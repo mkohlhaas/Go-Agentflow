@@ -120,7 +120,8 @@ validatable before it is executed.
 | `Task` | Runs a function once, optionally with retries. | `Next` |
 | `Choice` | Runs a deterministic function that returns a route key. | `When` / `Otherwise` |
 | `Decision` | Asks a `DecisionPolicy` to choose a declared option. | `RouteOption.Target` |
-| `Parallel` | Runs branches concurrently and waits for all of them. | `Next` after the join |
+| `Parallel` | Runs branches concurrently and waits for all of them. Branches share state. | `Next` after the join |
+| `ParallelIsolated` | Runs branches concurrently on isolated state copies, then merges. Mutex-free. | `Next` after the join |
 | `Wait` | Sleeps for a fixed duration, interruptible by context cancellation. | `Next` |
 | `Agent` | Runs a policy/tool loop until `Done`, `Fail`, or the iteration limit. | `Next` |
 | `Succeed` | Ends the workflow successfully. | terminal |
@@ -140,6 +141,7 @@ wf.Task(name, fn)                 // TaskFunc
 wf.Choice(name, fn)               // ChoiceFunc
 wf.Decision(name, spec)           // DecisionSpec
 wf.Parallel(name, branches...)    // Branch
+wf.ParallelIsolated(name, copy, merge, branches...) // Branch with per-branch state copies
 wf.Wait(name, duration)
 wf.Agent(name, spec)              // AgentSpec
 wf.Succeed(name)
@@ -272,7 +274,12 @@ from the goroutine driving the run, not from parallel branches.
   one was declared. Unknown keys fail the node.
 - `Parallel` starts all branches, waits for all of them, then continues at the
   join. The first error in declaration order is returned. Branches share the
-  state value, so callers must synchronise concurrent writes.
+  state value, so callers must synchronise concurrent writes. A failing branch
+  cancels in-flight siblings via context.
+- `ParallelIsolated` gives each branch its own deep copy of state, so branches
+  cannot race on shared fields. A `copy` function creates each branch's copy
+  and a `merge` function folds all copies back into the main state after the
+  join. No mutex is needed for disjoint writes.
 - `Wait` is a context-aware timer. Cancellation produces `StatusCanceled`.
 - `Succeed` and `Fail` are terminal and cannot have outgoing edges.
 
@@ -334,6 +341,9 @@ execution trace for that.
   protects agent loops.
 - **Cancellation is respected.** Pass a context and use `exec.CommandContext` for
   subprocesses so a canceled run stops.
+- **Parallel branches can run lock-free.** Use `ParallelIsolated` to give each
+  branch its own state copy; merge results back after the join. No mutex needed
+  for writes to disjoint fields.
 - **Verification is deterministic.** For coding tasks, use `go build`, `go test`,
   `go vet` and `gofmt` as gates. Do not let the LLM decide whether tests pass.
 - **The engine never spawns a shell.** Tools decide what they execute; keep
@@ -373,8 +383,9 @@ go run ./examples/codingagent -mermaid     # print the diagram
   There is no JSONPath or ASL-style data path layer.
 - **No built-in LLM client.** Implement `DecisionPolicy` and `AgentPolicy` for
   your provider. The library does not manage prompts, models or token budgets.
-- **No automatic state merging.** Parallel branches receive the same state
-  pointer. Use atomics, mutexes or per-branch results if they write concurrently.
+- **No automatic state merging.** `Parallel` branches receive the same state
+  pointer; use atomics, mutexes, or `ParallelIsolated` (per-branch copies with a
+  merge step) if branches write concurrently.
 - **No distributed execution.** Parallel means goroutines in one process.
 - **No human-in-the-loop node.** Model approval as a policy or an external
   signal inside a `Task`.

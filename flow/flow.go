@@ -13,6 +13,7 @@ package flow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -86,6 +87,23 @@ type RouteOption struct {
 	Key         string
 	Description string
 	Target      string
+}
+
+// MatchIs returns an ErrorRoute match function that matches errors using
+// errors.Is against target. Use it for sentinel errors:
+//
+//	node.Catch("recover", flow.MatchIs(ErrRepoLocked))
+func MatchIs[T any](target error) func(error) bool {
+	return func(err error) bool { return errors.Is(err, target) }
+}
+
+// MatchAs returns an ErrorRoute match function that matches errors using
+// errors.As into target. Use it for custom error types:
+//
+//	var fsErr *fs.PathError
+//	node.Catch("recover", flow.MatchAs(&fsErr))
+func MatchAs[T any](target any) func(error) bool {
+	return func(err error) bool { return errors.As(err, target) }
 }
 
 // DecisionPolicy chooses one of the declared options. Implementations usually
@@ -201,6 +219,12 @@ type Node[T any] struct {
 	ErrorRoutes []ErrorRoute
 	FailMessage string
 
+	// ParallelCopy, when non-nil, creates an isolated copy of state for each
+	// parallel branch. Branches mutate their own copy, so no mutex is needed
+	// for disjoint writes. ParallelMerge is required when Copy is set.
+	ParallelCopy  func(*T) *T
+	ParallelMerge func(main *T, copies []*T) error
+
 	workflow *Workflow[T]
 }
 
@@ -292,6 +316,25 @@ func (w *Workflow[T]) Parallel(name string, branches ...Branch[T]) *Node[T] {
 // Wait adds a Wait node.
 func (w *Workflow[T]) Wait(name string, delay time.Duration) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindWait, Delay: delay})
+}
+
+// ParallelIsolated adds a Parallel node where each branch receives its own
+// copy of the workflow state. Branches cannot race on shared fields because
+// they mutate isolated copies. After all branches complete, merge combines
+// the copies back into the main state.
+//
+// Use this when branches write to overlapping state fields and you want to
+// avoid mutexes. Copy must return a deep copy of state; Merge receives the
+// main state and all branch copies and should fold the results back in.
+func (w *Workflow[T]) ParallelIsolated(name string, copy func(*T) *T, merge func(main *T, copies []*T) error, branches ...Branch[T]) *Node[T] {
+	n := &Node[T]{
+		Name:          name,
+		Kind:          KindParallel,
+		Branches:      branches,
+		ParallelCopy:  copy,
+		ParallelMerge: merge,
+	}
+	return w.add(n)
 }
 
 // Agent adds an Agent node.
@@ -445,6 +488,9 @@ func (n *Node[T]) validate() error {
 				return fmt.Errorf("node %q: duplicate branch %q", n.Name, b.Name)
 			}
 			seen[b.Name] = true
+		}
+		if n.ParallelCopy != nil && n.ParallelMerge == nil {
+			return fmt.Errorf("node %q: parallel copy requires a merge function", n.Name)
 		}
 	case KindWait:
 		if n.Delay < 0 {

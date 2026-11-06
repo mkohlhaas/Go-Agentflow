@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -567,6 +568,150 @@ func TestObserverSeesEveryEvent(t *testing.T) {
 		if observed[i].Seq != res.Trace[i].Seq {
 			t.Fatalf("event %d mismatch: %+v vs %+v", i, observed[i], res.Trace[i])
 		}
+	}
+}
+
+func TestMatchIs(t *testing.T) {
+	boom := errors.New("boom")
+	m := flow.MatchIs[seqState](boom)
+	if !m(boom) {
+		t.Fatal("MatchIs should match the same error")
+	}
+	if m(errors.New("boom")) {
+		t.Fatal("MatchIs should not match a different error with the same message")
+	}
+}
+
+func TestMatchAs(t *testing.T) {
+	var target *os.PathError
+	m := flow.MatchAs[seqState](&target)
+
+	err := &os.PathError{Op: "open", Path: "foo", Err: errors.New("boom")}
+	if !m(err) {
+		t.Fatal("MatchAs should match the target type")
+	}
+	if m(errors.New("boom")) {
+		t.Fatal("MatchAs should not match an unrelated error")
+	}
+}
+
+func TestParallelCancelsSiblingsOnFailure(t *testing.T) {
+	boom := errors.New("branch b failed")
+	startedA := atomic.Bool{}
+	cancelledA := atomic.Bool{}
+
+	wf := flow.New[struct{}]("parallel-cancel")
+	wf.Parallel("fan",
+		flow.Branch[struct{}]{
+			Name: "a",
+			Run: func(ctx context.Context, _ *struct{}) error {
+				startedA.Store(true)
+				select {
+				case <-ctx.Done():
+					cancelledA.Store(true)
+					return ctx.Err()
+				case <-time.After(time.Hour):
+					return nil
+				}
+			},
+		},
+		flow.Branch[struct{}]{
+			Name: "b",
+			Run: func(context.Context, *struct{}) error {
+				return boom
+			},
+		},
+	).Next("done")
+	wf.Succeed("done")
+
+	var state struct{}
+	_, err := wf.Run(context.Background(), &state)
+	if !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want boom", err)
+	}
+	if !startedA.Load() {
+		t.Fatal("branch a did not start")
+	}
+	if !cancelledA.Load() {
+		t.Fatal("branch a was not cancelled after sibling failed")
+	}
+}
+
+func TestParallelIsolatedRunsOnCopies(t *testing.T) {
+	// Each branch writes to its own copy of state; no mutex needed.
+	copyState := func(s *seqState) *seqState {
+		steps := make([]string, len(s.Steps))
+		copy(steps, s.Steps)
+		return &seqState{
+			Value:    s.Value,
+			Steps:    steps,
+			Attempts: s.Attempts,
+			Flag:     s.Flag,
+		}
+	}
+	mergeState := func(main *seqState, copies []*seqState) error {
+		for _, c := range copies {
+			main.Value += c.Value
+			main.Steps = append(main.Steps, c.Steps...)
+			main.Attempts += c.Attempts
+			main.Flag = main.Flag || c.Flag
+		}
+		return nil
+	}
+
+	wf := flow.New[seqState]("parallel-isolated")
+	wf.ParallelIsolated("fan", copyState, mergeState,
+		flow.Branch[seqState]{
+			Name: "a",
+			Run: func(_ context.Context, s *seqState) error {
+				s.Value += 10
+				s.Steps = append(s.Steps, "a")
+				return nil
+			},
+		},
+		flow.Branch[seqState]{
+			Name: "b",
+			Run: func(_ context.Context, s *seqState) error {
+				s.Value += 20
+				s.Steps = append(s.Steps, "b")
+				s.Flag = true
+				return nil
+			},
+		},
+	).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	// Main state should not have been mutated by branches directly.
+	if state.Value != 30 {
+		t.Fatalf("Value = %d, want 30 (merged from copies)", state.Value)
+	}
+	if !state.Flag {
+		t.Fatal("Flag should be merged from branch b")
+	}
+	if len(state.Steps) != 2 {
+		t.Fatalf("Steps = %v, want [a b]", state.Steps)
+	}
+	if res.Steps != 2 {
+		t.Fatalf("Steps = %d, want 2", res.Steps)
+	}
+}
+
+func TestParallelIsolatedRequiresMerge(t *testing.T) {
+	wf := flow.New[seqState]("parallel-no-merge")
+	wf.ParallelIsolated("fan", func(s *seqState) *seqState { return s }, nil,
+		flow.Branch[seqState]{
+			Name: "a",
+			Run:  func(context.Context, *seqState) error { return nil },
+		},
+	)
+
+	var state seqState
+	_, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "parallel copy requires a merge function") {
+		t.Fatalf("error = %v, want merge required", err)
 	}
 }
 

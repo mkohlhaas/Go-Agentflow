@@ -360,10 +360,7 @@ func runDecision[T any](
 	emit func(Event),
 ) (string, error) {
 	spec := node.Decision
-	attempts := spec.MaxAttempts
-	if attempts < 1 {
-		attempts = 1
-	}
+	attempts := max(spec.MaxAttempts, 1)
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -403,13 +400,27 @@ func runParallel[T any](
 	step int,
 	emit func(Event),
 ) error {
+	if node.ParallelCopy != nil {
+		return runParallelIsolated(ctx, node, state, step, emit)
+	}
 	// Branches share state by design. Callers are responsible for any locking
 	// needed by concurrent mutations.
+	return runParallelShared(ctx, node, state, step, emit)
+}
+
+func runParallelShared[T any](
+	ctx context.Context,
+	node *Node[T],
+	state *T,
+	step int,
+	emit func(Event),
+) error {
 	branchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	errs := make([]error, len(node.Branches))
 	var wg sync.WaitGroup
+	var cancelOnce sync.Once
 	for i := range node.Branches {
 		branch := node.Branches[i]
 		emit(Event{Kind: EventBranchStarted, Node: node.Name, Branch: branch.Name, Step: step})
@@ -417,10 +428,75 @@ func runParallel[T any](
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = node.Branches[i].Run(branchCtx, state)
+			if errs[i] != nil {
+				// Cancel the shared branch context so other in-flight
+				// branches can stop early instead of running to completion.
+				cancelOnce.Do(cancel)
+			}
 		}(i)
 	}
 	wg.Wait()
 
+	return finishParallel(ctx, node, step, emit, errs)
+}
+
+func runParallelIsolated[T any](
+	ctx context.Context,
+	node *Node[T],
+	state *T,
+	step int,
+	emit func(Event),
+) error {
+	branchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Give each branch its own isolated copy of the state. Branches mutate
+	// their own copy, so no mutex is needed for disjoint writes.
+	copies := make([]*T, len(node.Branches))
+	for i := range node.Branches {
+		copies[i] = node.ParallelCopy(state)
+	}
+
+	errs := make([]error, len(node.Branches))
+	var wg sync.WaitGroup
+	var cancelOnce sync.Once
+	for i := range node.Branches {
+		branch := node.Branches[i]
+		emit(Event{Kind: EventBranchStarted, Node: node.Name, Branch: branch.Name, Step: step})
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = node.Branches[i].Run(branchCtx, copies[i])
+			if errs[i] != nil {
+				cancelOnce.Do(cancel)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if err := finishParallel(ctx, node, step, emit, errs); err != nil {
+		return err
+	}
+
+	// Merge all branch copies back into the main state.
+	if node.ParallelMerge != nil {
+		if err := node.ParallelMerge(state, copies); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// finishParallel emits branch events and returns the first non-cancellation
+// error. Cancellation errors from siblings (caused by cancelOnFirstError) are
+// secondary.
+func finishParallel[T any](
+	_ context.Context,
+	node *Node[T],
+	step int,
+	emit func(Event),
+	errs []error,
+) error {
 	for i, branch := range node.Branches {
 		if errs[i] != nil {
 			emit(Event{
@@ -434,10 +510,22 @@ func runParallel[T any](
 		}
 		emit(Event{Kind: EventBranchFinished, Node: node.Name, Branch: branch.Name, Step: step})
 	}
+
+	var cancelErr error
 	for _, err := range errs {
-		if err != nil {
-			return err
+		if err == nil {
+			continue
 		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if cancelErr == nil {
+				cancelErr = err
+			}
+			continue
+		}
+		return err
+	}
+	if cancelErr != nil {
+		return cancelErr
 	}
 	return nil
 }
