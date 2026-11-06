@@ -1,0 +1,719 @@
+package flow_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"agentflow/flow"
+)
+
+type seqState struct {
+	Value    int
+	Steps    []string
+	Attempts int
+	Flag     bool
+}
+
+func runOK[T any](t *testing.T, wf *flow.Workflow[T], state *T, opts ...flow.RunOption) *flow.Result[T] {
+	t.Helper()
+	res, err := wf.Run(context.Background(), state, opts...)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if res.Status != flow.StatusSucceeded {
+		t.Fatalf("status = %q, want %q", res.Status, flow.StatusSucceeded)
+	}
+	return res
+}
+
+func countEvents(events []flow.Event, kind flow.EventKind) int {
+	n := 0
+	for _, ev := range events {
+		if ev.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func TestSequence(t *testing.T) {
+	wf := flow.New[seqState]("sequence")
+	wf.Task("one", func(_ context.Context, s *seqState) error {
+		s.Steps = append(s.Steps, "one")
+		s.Value++
+		return nil
+	}).Next("two")
+	wf.Task("two", func(_ context.Context, s *seqState) error {
+		s.Steps = append(s.Steps, "two")
+		s.Value++
+		return nil
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	if state.Value != 2 {
+		t.Fatalf("Value = %d, want 2", state.Value)
+	}
+	if want := []string{"one", "two"}; fmt.Sprint(state.Steps) != fmt.Sprint(want) {
+		t.Fatalf("Steps = %v, want %v", state.Steps, want)
+	}
+	if res.Steps != 3 {
+		t.Fatalf("Steps = %d, want 3", res.Steps)
+	}
+	if res.LastNode != "done" {
+		t.Fatalf("LastNode = %q, want done", res.LastNode)
+	}
+	for i, ev := range res.Trace {
+		if ev.Seq != i+1 {
+			t.Fatalf("event %d has Seq %d", i, ev.Seq)
+		}
+	}
+	if got := res.Trace[len(res.Trace)-1].Kind; got != flow.EventWorkflowFinished {
+		t.Fatalf("last event = %q, want %q", got, flow.EventWorkflowFinished)
+	}
+}
+
+func TestChoiceLoopsAndUsesDefaultRoute(t *testing.T) {
+	wf := flow.New[seqState]("choice")
+	wf.Task("inc", func(_ context.Context, s *seqState) error {
+		s.Value++
+		return nil
+	}).Next("check")
+	wf.Choice("check", func(_ context.Context, s *seqState) (string, error) {
+		if s.Value < 2 {
+			return "again", nil
+		}
+		return "", nil
+	}).When("again", "inc").Otherwise("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	if state.Value != 2 {
+		t.Fatalf("Value = %d, want 2", state.Value)
+	}
+	if res.Steps != 5 {
+		t.Fatalf("Steps = %d, want 5", res.Steps)
+	}
+	if countEvents(res.Trace, flow.EventRouteSelected) != 2 {
+		t.Fatalf("route events = %d, want 2", countEvents(res.Trace, flow.EventRouteSelected))
+	}
+}
+
+func TestChoiceRejectsUnknownRoute(t *testing.T) {
+	wf := flow.New[seqState]("bad-choice")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("pick")
+	wf.Choice("pick", func(context.Context, *seqState) (string, error) {
+		return "invented", nil
+	}).Otherwise("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if res.Status != flow.StatusFailed {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+	if !strings.Contains(err.Error(), "unknown route") {
+		t.Fatalf("error = %v, want unknown route", err)
+	}
+}
+
+func TestTaskRetriesThenSucceeds(t *testing.T) {
+	wf := flow.New[seqState]("retry")
+	wf.Task("flaky", func(_ context.Context, s *seqState) error {
+		s.Attempts++
+		if s.Attempts < 3 {
+			return fmt.Errorf("attempt %d failed", s.Attempts)
+		}
+		return nil
+	}).WithRetry(flow.RetryPolicy{
+		MaxAttempts:     3,
+		InitialInterval: time.Millisecond,
+		Backoff:         2,
+		MaxInterval:     5 * time.Millisecond,
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	if state.Attempts != 3 {
+		t.Fatalf("Attempts = %d, want 3", state.Attempts)
+	}
+	if got := countEvents(res.Trace, flow.EventRetry); got != 2 {
+		t.Fatalf("retry events = %d, want 2", got)
+	}
+}
+
+func TestCatchRoutesMatchingError(t *testing.T) {
+	boom := errors.New("boom")
+	wf := flow.New[seqState]("catch")
+	wf.Task("work", func(context.Context, *seqState) error {
+		return boom
+	}).Catch("recover", func(err error) bool {
+		return errors.Is(err, boom)
+	}).Next("never")
+	wf.Task("never", func(context.Context, *seqState) error {
+		t.Fatal("unhandled path should not run")
+		return nil
+	}).Next("done")
+	wf.Task("recover", func(_ context.Context, s *seqState) error {
+		s.Flag = true
+		return nil
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	if !state.Flag {
+		t.Fatal("recovery task did not run")
+	}
+	if got := countEvents(res.Trace, flow.EventRouteSelected); got != 1 {
+		t.Fatalf("route events = %d, want 1", got)
+	}
+}
+
+func TestUnhandledTaskErrorFailsWorkflow(t *testing.T) {
+	wf := flow.New[seqState]("fail")
+	wf.Task("work", func(context.Context, *seqState) error {
+		return errors.New("kaboom")
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "kaboom") {
+		t.Fatalf("error = %v, want kaboom", err)
+	}
+	if res.Status != flow.StatusFailed {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+	if res.LastNode != "work" {
+		t.Fatalf("LastNode = %q, want work", res.LastNode)
+	}
+}
+
+func TestFailNodeEndsWorkflow(t *testing.T) {
+	wf := flow.New[seqState]("explicit-fail")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("give-up")
+	wf.Fail("give-up", "deliberate stop")
+
+	var state seqState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "deliberate stop") {
+		t.Fatalf("error = %v, want deliberate stop", err)
+	}
+	if res.Status != flow.StatusFailed || res.LastNode != "give-up" {
+		t.Fatalf("result = %+v, want failed at give-up", res)
+	}
+	if got := res.Trace[len(res.Trace)-1].Kind; got != flow.EventWorkflowFailed {
+		t.Fatalf("last event = %q, want workflow_failed", got)
+	}
+}
+
+type parState struct {
+	A int64
+	B int64
+}
+
+func TestParallelRunsBranchesAndJoins(t *testing.T) {
+	wf := flow.New[parState]("parallel")
+	wf.Parallel("fan",
+		flow.Branch[parState]{Name: "a", Run: func(_ context.Context, s *parState) error {
+			atomic.StoreInt64(&s.A, 1)
+			return nil
+		}},
+		flow.Branch[parState]{Name: "b", Run: func(_ context.Context, s *parState) error {
+			atomic.StoreInt64(&s.B, 2)
+			return nil
+		}},
+	).Next("done")
+	wf.Succeed("done")
+
+	var state parState
+	res := runOK(t, wf, &state)
+
+	if state.A != 1 || state.B != 2 {
+		t.Fatalf("state = %+v, want A=1 B=2", state)
+	}
+	if got := countEvents(res.Trace, flow.EventBranchStarted); got != 2 {
+		t.Fatalf("branch started = %d, want 2", got)
+	}
+	if got := countEvents(res.Trace, flow.EventBranchFinished); got != 2 {
+		t.Fatalf("branch finished = %d, want 2", got)
+	}
+}
+
+func TestParallelBranchErrorFailsWorkflow(t *testing.T) {
+	boom := errors.New("branch failed")
+	wf := flow.New[parState]("parallel-fail")
+	wf.Parallel("fan",
+		flow.Branch[parState]{Name: "ok", Run: func(context.Context, *parState) error {
+			return nil
+		}},
+		flow.Branch[parState]{Name: "bad", Run: func(context.Context, *parState) error {
+			return boom
+		}},
+	).Next("done")
+	wf.Succeed("done")
+
+	var state parState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil || !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want boom", err)
+	}
+	if res.Status != flow.StatusFailed {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+	if got := countEvents(res.Trace, flow.EventBranchFailed); got != 1 {
+		t.Fatalf("branch failed events = %d, want 1", got)
+	}
+}
+
+func TestWaitStopsOnCancellation(t *testing.T) {
+	wf := flow.New[struct{}]("wait")
+	wf.Wait("pause", time.Hour).Next("done")
+	wf.Succeed("done")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	var state struct{}
+	res, err := wf.Run(ctx, &state)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+	if res.Status != flow.StatusCanceled {
+		t.Fatalf("status = %q, want canceled", res.Status)
+	}
+	if res.LastNode != "pause" {
+		t.Fatalf("LastNode = %q, want pause", res.LastNode)
+	}
+}
+
+type decisionState struct {
+	Calls int
+	Seen  []flow.RouteOption
+}
+
+func TestDecisionRetriesInvalidOption(t *testing.T) {
+	policy := flow.DecisionFunc[decisionState](func(_ context.Context, s *decisionState, opts []flow.RouteOption) (string, error) {
+		s.Calls++
+		s.Seen = append([]flow.RouteOption(nil), opts...)
+		if s.Calls == 1 {
+			return "invented", nil
+		}
+		return "yes", nil
+	})
+
+	wf := flow.New[decisionState]("decision")
+	wf.Task("start", func(context.Context, *decisionState) error { return nil }).Next("pick")
+	wf.Decision("pick", flow.DecisionSpec[decisionState]{
+		Options: []flow.RouteOption{
+			{Key: "yes", Description: "continue", Target: "done"},
+			{Key: "no", Description: "stop", Target: "stop"},
+		},
+		Choose:      policy,
+		MaxAttempts: 2,
+	})
+	wf.Succeed("done")
+	wf.Fail("stop", "policy chose to stop")
+
+	var state decisionState
+	res := runOK(t, wf, &state)
+
+	if state.Calls != 2 {
+		t.Fatalf("Calls = %d, want 2", state.Calls)
+	}
+	if len(state.Seen) != 2 || state.Seen[0].Description != "continue" {
+		t.Fatalf("policy saw options %+v", state.Seen)
+	}
+	if got := countEvents(res.Trace, flow.EventDecisionRejected); got != 1 {
+		t.Fatalf("rejected events = %d, want 1", got)
+	}
+}
+
+func TestDecisionExhaustsAttempts(t *testing.T) {
+	policy := flow.DecisionFunc[decisionState](func(context.Context, *decisionState, []flow.RouteOption) (string, error) {
+		return "invented", nil
+	})
+
+	wf := flow.New[decisionState]("decision-fail")
+	wf.Task("start", func(context.Context, *decisionState) error { return nil }).Next("pick")
+	wf.Decision("pick", flow.DecisionSpec[decisionState]{
+		Options:     []flow.RouteOption{{Key: "yes", Target: "done"}},
+		Choose:      policy,
+		MaxAttempts: 2,
+	})
+	wf.Succeed("done")
+
+	var state decisionState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "unknown option") {
+		t.Fatalf("error = %v, want unknown option", err)
+	}
+	if res.Status != flow.StatusFailed {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+	if got := countEvents(res.Trace, flow.EventDecisionRejected); got != 2 {
+		t.Fatalf("rejected events = %d, want 2", got)
+	}
+}
+
+type agentState struct {
+	Value   int
+	History []flow.AgentTurn
+}
+
+func addTool() flow.Tool[agentState] {
+	return flow.Tool[agentState]{
+		Name:        "add",
+		Description: "increment the value",
+		Run: func(_ context.Context, s *agentState, _ map[string]string) (string, error) {
+			s.Value++
+			return "incremented", nil
+		},
+	}
+}
+
+func TestAgentLoopCallsToolsUntilDone(t *testing.T) {
+	wf := flow.New[agentState]("agent")
+	wf.Agent("repair", flow.AgentSpec[agentState]{
+		Goal: "increment three times",
+		Policy: flow.AgentFunc[agentState](func(_ context.Context, _ *agentState, history []flow.AgentTurn) (flow.AgentDecision, error) {
+			if len(history) < 3 {
+				return flow.AgentDecision{Thought: "add one", Tool: "add"}, nil
+			}
+			return flow.AgentDecision{Done: true, Message: "target reached"}, nil
+		}),
+		Tools:         []flow.Tool[agentState]{addTool()},
+		MaxIterations: 10,
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state agentState
+	res := runOK(t, wf, &state)
+
+	if state.Value != 3 {
+		t.Fatalf("Value = %d, want 3", state.Value)
+	}
+	if got := countEvents(res.Trace, flow.EventToolFinished); got != 3 {
+		t.Fatalf("tool finished events = %d, want 3", got)
+	}
+	if got := countEvents(res.Trace, flow.EventAgentThought); got != 3 {
+		t.Fatalf("agent thought events = %d, want 3", got)
+	}
+	if got := countEvents(res.Trace, flow.EventAgentFinished); got != 1 {
+		t.Fatalf("agent finished events = %d, want 1", got)
+	}
+}
+
+func TestAgentFeedsUnknownToolBackToPolicy(t *testing.T) {
+	wf := flow.New[agentState]("agent-unknown")
+	wf.Agent("repair", flow.AgentSpec[agentState]{
+		Policy: flow.AgentFunc[agentState](func(_ context.Context, s *agentState, history []flow.AgentTurn) (flow.AgentDecision, error) {
+			switch len(history) {
+			case 0:
+				return flow.AgentDecision{Tool: "missing"}, nil
+			case 1:
+				return flow.AgentDecision{Tool: "add"}, nil
+			default:
+				s.History = append([]flow.AgentTurn(nil), history...)
+				return flow.AgentDecision{Done: true}, nil
+			}
+		}),
+		Tools:         []flow.Tool[agentState]{addTool()},
+		MaxIterations: 5,
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state agentState
+	res := runOK(t, wf, &state)
+
+	if len(state.History) != 2 {
+		t.Fatalf("history length = %d, want 2", len(state.History))
+	}
+	if !strings.Contains(state.History[0].Error, "unknown tool") {
+		t.Fatalf("first history error = %q, want unknown tool", state.History[0].Error)
+	}
+	if got := countEvents(res.Trace, flow.EventToolRejected); got != 1 {
+		t.Fatalf("tool rejected events = %d, want 1", got)
+	}
+}
+
+func TestAgentToolErrorIsAnObservation(t *testing.T) {
+	failing := flow.Tool[agentState]{
+		Name: "fail",
+		Run: func(context.Context, *agentState, map[string]string) (string, error) {
+			return "partial", errors.New("tool exploded")
+		},
+	}
+	wf := flow.New[agentState]("agent-tool-error")
+	wf.Agent("repair", flow.AgentSpec[agentState]{
+		Policy: flow.AgentFunc[agentState](func(_ context.Context, s *agentState, history []flow.AgentTurn) (flow.AgentDecision, error) {
+			if len(history) == 0 {
+				return flow.AgentDecision{Tool: "fail"}, nil
+			}
+			s.History = append([]flow.AgentTurn(nil), history...)
+			return flow.AgentDecision{Done: true}, nil
+		}),
+		Tools:         []flow.Tool[agentState]{failing},
+		MaxIterations: 5,
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state agentState
+	res := runOK(t, wf, &state)
+
+	if len(state.History) != 1 || !strings.Contains(state.History[0].Error, "tool exploded") {
+		t.Fatalf("history = %+v, want tool error", state.History)
+	}
+	if got := countEvents(res.Trace, flow.EventToolFailed); got != 1 {
+		t.Fatalf("tool failed events = %d, want 1", got)
+	}
+}
+
+func TestAgentIterationLimit(t *testing.T) {
+	wf := flow.New[agentState]("agent-limit")
+	wf.Agent("repair", flow.AgentSpec[agentState]{
+		Policy: flow.AgentFunc[agentState](func(context.Context, *agentState, []flow.AgentTurn) (flow.AgentDecision, error) {
+			return flow.AgentDecision{Tool: "add"}, nil
+		}),
+		Tools:         []flow.Tool[agentState]{addTool()},
+		MaxIterations: 2,
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state agentState
+	res, err := wf.Run(context.Background(), &state)
+	if !errors.Is(err, flow.ErrAgentIterations) {
+		t.Fatalf("error = %v, want ErrAgentIterations", err)
+	}
+	if res.Status != flow.StatusFailed {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+	if state.Value != 2 {
+		t.Fatalf("Value = %d, want 2", state.Value)
+	}
+}
+
+func TestAgentCanReportFailure(t *testing.T) {
+	wf := flow.New[agentState]("agent-fail")
+	wf.Agent("repair", flow.AgentSpec[agentState]{
+		Policy: flow.AgentFunc[agentState](func(context.Context, *agentState, []flow.AgentTurn) (flow.AgentDecision, error) {
+			return flow.AgentDecision{Fail: true, Message: "cannot fix this"}, nil
+		}),
+		MaxIterations: 2,
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state agentState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "cannot fix this") {
+		t.Fatalf("error = %v, want agent message", err)
+	}
+	if res.Status != flow.StatusFailed {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+}
+
+func TestMaxStepsProtectsLoops(t *testing.T) {
+	wf := flow.New[seqState]("loop")
+	wf.Task("loop", func(_ context.Context, s *seqState) error {
+		s.Value++
+		return nil
+	}).Next("loop")
+
+	var state seqState
+	res, err := wf.Run(context.Background(), &state, flow.WithMaxSteps(3))
+	if !errors.Is(err, flow.ErrMaxSteps) {
+		t.Fatalf("error = %v, want ErrMaxSteps", err)
+	}
+	if res.Steps != 3 {
+		t.Fatalf("Steps = %d, want 3", res.Steps)
+	}
+	if state.Value != 3 {
+		t.Fatalf("Value = %d, want 3", state.Value)
+	}
+}
+
+func TestObserverSeesEveryEvent(t *testing.T) {
+	wf := flow.New[seqState]("observe")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("done")
+	wf.Succeed("done")
+
+	var observed []flow.Event
+	var state seqState
+	res := runOK(t, wf, &state, flow.WithObserver(func(ev flow.Event) {
+		observed = append(observed, ev)
+	}))
+
+	if len(observed) != len(res.Trace) {
+		t.Fatalf("observed %d events, trace has %d", len(observed), len(res.Trace))
+	}
+	for i := range observed {
+		if observed[i].Seq != res.Trace[i].Seq {
+			t.Fatalf("event %d mismatch: %+v vs %+v", i, observed[i], res.Trace[i])
+		}
+	}
+}
+
+func TestValidateRejectsBadGraphs(t *testing.T) {
+	tests := []struct {
+		name   string
+		build  func() *flow.Workflow[seqState]
+		expect string
+	}{
+		{
+			name: "missing next",
+			build: func() *flow.Workflow[seqState] {
+				wf := flow.New[seqState]("bad")
+				wf.Task("task", func(context.Context, *seqState) error { return nil })
+				return wf
+			},
+			expect: "Next is not set",
+		},
+		{
+			name: "missing target",
+			build: func() *flow.Workflow[seqState] {
+				wf := flow.New[seqState]("bad")
+				wf.Task("task", func(context.Context, *seqState) error { return nil }).Next("nowhere")
+				return wf
+			},
+			expect: "does not exist",
+		},
+		{
+			name: "nil task",
+			build: func() *flow.Workflow[seqState] {
+				wf := flow.New[seqState]("bad")
+				wf.Task("task", nil).Next("done")
+				wf.Succeed("done")
+				return wf
+			},
+			expect: "task function is nil",
+		},
+		{
+			name: "choice without routes",
+			build: func() *flow.Workflow[seqState] {
+				wf := flow.New[seqState]("bad")
+				wf.Choice("choice", func(context.Context, *seqState) (string, error) { return "x", nil })
+				return wf
+			},
+			expect: "choice has no routes",
+		},
+		{
+			name: "decision without policy",
+			build: func() *flow.Workflow[seqState] {
+				wf := flow.New[seqState]("bad")
+				wf.Decision("decision", flow.DecisionSpec[seqState]{
+					Options: []flow.RouteOption{{Key: "x", Target: "done"}},
+				})
+				wf.Succeed("done")
+				return wf
+			},
+			expect: "decision policy is nil",
+		},
+		{
+			name: "terminal has next",
+			build: func() *flow.Workflow[seqState] {
+				wf := flow.New[seqState]("bad")
+				wf.Succeed("done").Next("done")
+				return wf
+			},
+			expect: "terminal node must not have Next",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var state seqState
+			_, err := tt.build().Run(context.Background(), &state)
+			if err == nil || !strings.Contains(err.Error(), tt.expect) {
+				t.Fatalf("error = %v, want %q", err, tt.expect)
+			}
+		})
+	}
+}
+
+func TestMermaidRendering(t *testing.T) {
+	wf := flow.New[seqState]("all-nodes")
+	wf.Task("load", func(context.Context, *seqState) error { return nil }).
+		WithRetry(flow.RetryPolicy{MaxAttempts: 2, InitialInterval: time.Millisecond}).
+		Catch("fail", nil).
+		Next("triage")
+	wf.Decision("triage", flow.DecisionSpec[seqState]{
+		Options: []flow.RouteOption{
+			{Key: "fix", Description: "repair the code", Target: "gate"},
+			{Key: "skip", Description: "stop", Target: "fail"},
+		},
+		Choose: flow.DecisionFunc[seqState](func(context.Context, *seqState, []flow.RouteOption) (string, error) {
+			return "fix", nil
+		}),
+	})
+	wf.Choice("gate", func(context.Context, *seqState) (string, error) {
+		return "ok", nil
+	}).When("ok", "fan").Otherwise("fail")
+	wf.Parallel("fan",
+		flow.Branch[seqState]{Name: "build", Run: func(context.Context, *seqState) error { return nil }},
+		flow.Branch[seqState]{Name: "test", Run: func(context.Context, *seqState) error { return nil }},
+	).Next("slow")
+	wf.Wait("slow", time.Second).Next("repair")
+	wf.Agent("repair", flow.AgentSpec[seqState]{
+		Policy: flow.AgentFunc[seqState](func(context.Context, *seqState, []flow.AgentTurn) (flow.AgentDecision, error) {
+			return flow.AgentDecision{Done: true}, nil
+		}),
+		Tools: []flow.Tool[seqState]{
+			{Name: "run_tests", Run: func(context.Context, *seqState, map[string]string) (string, error) {
+				return "ok", nil
+			}},
+		},
+	}).Next("done")
+	wf.Succeed("done")
+	wf.Fail("fail", "gave up")
+
+	first := wf.Mermaid()
+	second := wf.Mermaid()
+	if first != second {
+		t.Fatal("Mermaid output is not deterministic")
+	}
+
+	checks := []string{
+		"flowchart TD",
+		`start(["start"])`,
+		`start --> n0`,
+		`n0["load<br/><small>task / retry x2</small>"]`,
+		`n1{{"triage<br/><small>decision / 2 options</small>"}}`,
+		`n2{"gate<br/><small>choice</small>"}`,
+		`n4["slow<br/><small>wait 1s</small>"]`,
+		`n5["repair<br/><small>agent loop / 1 tools</small>"]`,
+		`n1 -->|"fix"| n2`,
+		`n1 -->|"skip"| n7`,
+		`n2 -->|"ok"| n3`,
+		`n2 -->|"otherwise"| n7`,
+		`subgraph n3_par["parallel branches"]`,
+		`n3_b0["branch: build"]`,
+		`n3 --> n3_b0`,
+		`n3_b0 --> n4`,
+		`n4 --> n5`,
+		`n5 --> n6`,
+		`n0 -.->|"error"| n7`,
+		`classDef decision`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(first, want) {
+			t.Errorf("Mermaid output missing %q\n---\n%s", want, first)
+		}
+	}
+}
