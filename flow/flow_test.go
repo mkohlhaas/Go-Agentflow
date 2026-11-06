@@ -583,8 +583,7 @@ func TestMatchIs(t *testing.T) {
 }
 
 func TestMatchAs(t *testing.T) {
-	var target *os.PathError
-	m := flow.MatchAs[seqState](&target)
+	m := flow.MatchAs(&os.PathError{})
 
 	err := &os.PathError{Op: "open", Path: "foo", Err: errors.New("boom")}
 	if !m(err) {

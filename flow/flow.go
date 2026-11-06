@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 )
 
@@ -98,12 +99,25 @@ func MatchIs[T any](target error) func(error) bool {
 }
 
 // MatchAs returns an ErrorRoute match function that matches errors using
-// errors.As into target. Use it for custom error types:
+// errors.As semantics into target. Use it for custom error types:
 //
-//	var fsErr *fs.PathError
-//	node.Catch("recover", flow.MatchAs(&fsErr))
-func MatchAs[T any](target any) func(error) bool {
-	return func(err error) bool { return errors.As(err, target) }
+//	node.Catch("recover", flow.MatchAs(&fsErr{}))
+//
+// The target is only used to establish the error type; its value is
+// ignored. Pass a pointer to the error type you want to match, e.g.
+// flow.MatchAs(&MyErr{}). The match succeeds when err's chain contains an
+// error whose type is assignable to *T.
+func MatchAs[T any](target *T) func(error) bool {
+	targetType := reflect.TypeOf(target) // *T
+	return func(err error) bool {
+		for err != nil {
+			if reflect.TypeOf(err).AssignableTo(targetType) {
+				return true
+			}
+			err = errors.Unwrap(err)
+		}
+		return false
+	}
 }
 
 // DecisionPolicy chooses one of the declared options. Implementations usually
