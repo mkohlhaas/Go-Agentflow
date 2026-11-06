@@ -259,6 +259,9 @@ func (w *Workflow[T]) executeNode(
 		}
 		return node.NextNode, nil
 
+	case KindSubWorkflow:
+		return runSubWorkflow(ctx, node, state, step, emit)
+
 	case KindSucceed, KindFail:
 		return "", nil
 	}
@@ -542,6 +545,51 @@ func runWait[T any](ctx context.Context, node *Node[T]) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func runSubWorkflow[T any](
+	ctx context.Context,
+	node *Node[T],
+	state *T,
+	step int,
+	emit func(Event),
+) (string, error) {
+	sub := node.SubWorkflow
+	if sub == nil {
+		return "", fmt.Errorf("node %q: sub-workflow is nil", node.Name)
+	}
+
+	emit(Event{
+		Kind: EventNodeStarted,
+		Node: node.Name,
+		Step: step,
+	})
+
+	// Run the sub-workflow synchronously. It shares the parent's state and
+	// counts as a single opaque step in the parent graph.
+	subResult, subErr := sub.Run(ctx, state)
+
+	if subErr != nil {
+		// Attach the sub-workflow's trace to the error (A + D) so the
+		// parent can debug what happened inside. The error implements
+		// Unwrap so errors.Is/errors.As work with Catch routes.
+		var subTrace []Event
+		if subResult != nil {
+			subTrace = subResult.Trace
+		}
+		return "", &SubWorkflowError{
+			Err:   subErr,
+			Trace: subTrace,
+		}
+	}
+
+	emit(Event{
+		Kind: EventNodeFinished,
+		Node: node.Name,
+		Step: step,
+	})
+
+	return node.NextNode, nil
 }
 
 func runAgent[T any](

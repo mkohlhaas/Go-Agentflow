@@ -861,3 +861,173 @@ func TestMermaidRendering(t *testing.T) {
 		}
 	}
 }
+
+func TestSubWorkflowRunsAndCompletes(t *testing.T) {
+	// Build a sub-workflow that increments a counter.
+	sub := flow.New[seqState]("sub")
+	sub.Task("inc", func(_ context.Context, s *seqState) error {
+		s.Value++
+		return nil
+	}).Next("done")
+	sub.Succeed("done")
+
+	// Parent workflow calls the sub-workflow as a single node.
+	wf := flow.New[seqState]("parent")
+	wf.Task("setup", func(_ context.Context, s *seqState) error {
+		s.Value = 0
+		return nil
+	}).Next("run-sub")
+	wf.SubWorkflow("run-sub", sub).Next("report")
+	wf.Task("report", func(_ context.Context, s *seqState) error {
+		return nil
+	}).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	if state.Value != 1 {
+		t.Fatalf("Value = %d, want 1", state.Value)
+	}
+	if res.Steps != 4 {
+		t.Fatalf("Steps = %d, want 4 (setup, sub-workflow, report, done)", res.Steps)
+	}
+}
+
+func TestSubWorkflowPropagatesErrorWithTrace(t *testing.T) {
+	boom := errors.New("sub-workflow failure")
+
+	// Sub-workflow that fails.
+	sub := flow.New[seqState]("failing-sub")
+	sub.Task("bad", func(context.Context, *seqState) error {
+		return boom
+	}).Next("done")
+	sub.Succeed("done")
+
+	// Parent without Catch: error propagates with trace attached.
+	wf := flow.New[seqState]("parent")
+	wf.Task("setup", func(context.Context, *seqState) error { return nil }).Next("run-sub")
+	wf.SubWorkflow("run-sub", sub).Next("report")
+	wf.Task("report", func(context.Context, *seqState) error { return nil }).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	_, err := wf.Run(context.Background(), &state)
+	if err == nil {
+		t.Fatal("expected error from failing sub-workflow")
+	}
+
+	var swe *flow.SubWorkflowError
+	if !errors.As(err, &swe) {
+		t.Fatalf("error = %v, want *flow.SubWorkflowError", err)
+	}
+	if len(swe.Trace) == 0 {
+		t.Fatal("SubWorkflowError should have non-empty trace")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want errors.Is(boom) = true", err)
+	}
+
+	// Parent with Catch: sub-workflow error is handled by error route.
+	wf2 := flow.New[seqState]("parent-with-catch")
+	wf2.Task("setup", func(context.Context, *seqState) error { return nil }).Next("run-sub")
+	wf2.SubWorkflow("run-sub", sub).
+		Catch("recover", flow.MatchAs(&flow.SubWorkflowError{})).
+		Next("report")
+	wf2.Task("recover", func(_ context.Context, s *seqState) error {
+		s.Flag = true
+		return nil
+	}).Next("report")
+	wf2.Task("report", func(context.Context, *seqState) error { return nil }).Next("done")
+	wf2.Succeed("done")
+
+	var state2 seqState
+	res := runOK(t, wf2, &state2)
+	if res.Status != flow.StatusSucceeded {
+		t.Fatalf("status = %q, want succeeded", res.Status)
+	}
+	if !state2.Flag {
+		t.Fatal("recovery task did not run")
+	}
+}
+
+func TestSubWorkflowNested(t *testing.T) {
+	// Innermost sub-workflow.
+	inner := flow.New[seqState]("inner")
+	inner.Task("inner-task", func(_ context.Context, s *seqState) error {
+		s.Value++
+		return nil
+	}).Next("inner-done")
+	inner.Succeed("inner-done")
+
+	// Middle sub-workflow contains the inner one.
+	middle := flow.New[seqState]("middle")
+	middle.Task("mid-prep", func(context.Context, *seqState) error { return nil }).Next("run-inner")
+	middle.SubWorkflow("run-inner", inner).Next("mid-done")
+	middle.Succeed("mid-done")
+
+	// Parent contains the middle sub-workflow.
+	wf := flow.New[seqState]("parent")
+	wf.Task("start", func(_ context.Context, s *seqState) error {
+		s.Value = 0
+		return nil
+	}).Next("run-middle")
+	wf.SubWorkflow("run-middle", middle).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	if state.Value != 1 {
+		t.Fatalf("Value = %d, want 1", state.Value)
+	}
+	if res.Steps != 3 {
+		t.Fatalf("Steps = %d, want 3 (start, sub-workflow, done)", res.Steps)
+	}
+}
+
+func TestSubWorkflowValidation(t *testing.T) {
+	// Nil sub-workflow should fail validation.
+	wf := flow.New[seqState]("bad")
+	wf.SubWorkflow("sub", nil).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	_, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "sub-workflow is nil") {
+		t.Fatalf("error = %v, want 'sub-workflow is nil'", err)
+	}
+
+	// Invalid sub-workflow (missing Next) should fail parent validation.
+	sub := flow.New[seqState]("invalid-sub")
+	sub.Task("task", func(context.Context, *seqState) error { return nil })
+	// No Next on the task - validation will catch it
+
+	wf2 := flow.New[seqState]("parent2")
+	wf2.SubWorkflow("sub", sub).Next("done")
+	wf2.Succeed("done")
+
+	_, err = wf2.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "Next is not set") {
+		t.Fatalf("error = %v, want 'Next is not set'", err)
+	}
+}
+
+func TestMermaidRenderingSubWorkflow(t *testing.T) {
+	sub := flow.New[seqState]("sub")
+	sub.Task("sub-task", func(context.Context, *seqState) error { return nil }).Next("sub-done")
+	sub.Succeed("sub-done")
+
+	wf := flow.New[seqState]("parent")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("run-sub")
+	wf.SubWorkflow("run-sub", sub).Next("done")
+	wf.Succeed("done")
+
+	out := wf.Mermaid()
+	if !strings.Contains(out, `n1[["run-sub<br/><small>sub-workflow / 2 nodes</small>"]]`) {
+		t.Errorf("Mermaid output missing sub-workflow node\n---\n%s", out)
+	}
+	if !strings.Contains(out, `classDef subworkflow`) {
+		t.Errorf("Mermaid output missing subworkflow classDef\n---\n%s", out)
+	}
+}

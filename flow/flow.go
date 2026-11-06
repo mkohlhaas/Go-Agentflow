@@ -37,6 +37,8 @@ const (
 	KindWait NodeKind = "wait"
 	// KindAgent runs an iterative tool-selection loop driven by a policy.
 	KindAgent NodeKind = "agent"
+	// KindSubWorkflow runs a nested workflow as a single node.
+	KindSubWorkflow NodeKind = "sub-workflow"
 	// KindSucceed ends the workflow successfully.
 	KindSucceed NodeKind = "succeed"
 	// KindFail ends the workflow with an error.
@@ -81,6 +83,27 @@ type ErrorRoute struct {
 	// Match decides whether this route applies. A nil Match accepts any error.
 	Match func(error) bool
 }
+
+// SubWorkflowError wraps a sub-workflow failure and attaches its execution
+// trace so the parent can debug what happened inside. It implements
+// errors.Is and errors.As so Catch routes with flow.MatchIs/flow.MatchAs
+// can match against it.
+type SubWorkflowError struct {
+	// Err is the terminal error returned by the sub-workflow.
+	Err error
+	// Trace is the sub-workflow's execution trace, attached for debugging.
+	Trace []Event
+}
+
+func (e *SubWorkflowError) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "sub-workflow failed"
+}
+
+// Unwrap allows errors.Is and errors.As to look through SubWorkflowError.
+func (e *SubWorkflowError) Unwrap() error { return e.Err }
 
 // RouteOption is a decision the policy is allowed to make. Target is the node
 // the workflow follows when the option is chosen.
@@ -239,6 +262,12 @@ type Node[T any] struct {
 	ParallelCopy  func(*T) *T
 	ParallelMerge func(main *T, copies []*T) error
 
+	// SubWorkflow, when non-nil, runs a nested workflow as a single node.
+	// The sub-workflow shares the parent's state (*T). On completion, the
+	// parent continues at NextNode. On failure, a SubWorkflowError is
+	// returned with the sub-workflow's trace attached.
+	SubWorkflow *Workflow[T]
+
 	workflow *Workflow[T]
 }
 
@@ -354,6 +383,14 @@ func (w *Workflow[T]) ParallelIsolated(name string, copy func(*T) *T, merge func
 // Agent adds an Agent node.
 func (w *Workflow[T]) Agent(name string, spec AgentSpec[T]) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindAgent, Agent: &spec})
+}
+
+// SubWorkflow adds a nested workflow as a single node. The sub-workflow runs
+// synchronously and shares the parent's state. On completion, the parent
+// continues at NextNode. On failure, a SubWorkflowError is returned with the
+// sub-workflow's trace attached. Sub-workflows can be nested to any depth.
+func (w *Workflow[T]) SubWorkflow(name string, sub *Workflow[T]) *Node[T] {
+	return w.add(&Node[T]{Name: name, Kind: KindSubWorkflow, SubWorkflow: sub})
 }
 
 // Succeed adds a terminal successful node.
@@ -532,6 +569,13 @@ func (n *Node[T]) validate() error {
 				return fmt.Errorf("node %q: duplicate agent tool %q", n.Name, t.Name)
 			}
 			seen[t.Name] = true
+		}
+	case KindSubWorkflow:
+		if n.SubWorkflow == nil {
+			return fmt.Errorf("node %q: sub-workflow is nil", n.Name)
+		}
+		if err := n.SubWorkflow.Validate(); err != nil {
+			return fmt.Errorf("node %q: sub-workflow validation: %w", n.Name, err)
 		}
 	case KindSucceed, KindFail:
 	default:

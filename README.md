@@ -124,6 +124,7 @@ validatable before it is executed.
 | `ParallelIsolated` | Runs branches concurrently on isolated state copies, then merges. Mutex-free. | `Next` after the join |
 | `Wait` | Sleeps for a fixed duration, interruptible by context cancellation. | `Next` |
 | `Agent` | Runs a policy/tool loop until `Done`, `Fail`, or the iteration limit. | `Next` |
+| `SubWorkflow` | Runs a nested workflow as a single node, sharing state. Can nest to any depth. | `Next` after the sub-workflow completes |
 | `Succeed` | Ends the workflow successfully. | terminal |
 | `Fail` | Ends the workflow with an error message. | terminal |
 
@@ -142,6 +143,7 @@ wf.Choice(name, fn)               // ChoiceFunc
 wf.Decision(name, spec)           // DecisionSpec
 wf.Parallel(name, branches...)    // Branch
 wf.ParallelIsolated(name, copy, merge, branches...) // Branch with per-branch state copies
+wf.SubWorkflow(name, sub)                           // Nested workflow as a single node
 wf.Wait(name, duration)
 wf.Agent(name, spec)              // AgentSpec
 wf.Succeed(name)
@@ -247,6 +249,19 @@ an error matches, the engine follows the error route and continues; otherwise
 the workflow fails. Context cancellation always wins: cancellation is reported
 as `StatusCanceled`, not routed through `Catch`.
 
+A `SubWorkflow` node that fails returns a `*flow.SubWorkflowError`, which wraps
+the sub-workflow's terminal error and attaches its execution trace. Use
+`flow.MatchIs` or `flow.MatchAs` on `Catch` to match it:
+
+```go
+wf.SubWorkflow("process", sub).
+    Catch("recover", flow.MatchAs(&flow.SubWorkflowError{})).
+    Next("report")
+```
+
+The attached trace lets you drill into what happened inside the sub-workflow
+without running it in isolation.
+
 ### Observing a run
 
 ```go
@@ -280,6 +295,12 @@ from the goroutine driving the run, not from parallel branches.
   cannot race on shared fields. A `copy` function creates each branch's copy
   and a `merge` function folds all copies back into the main state after the
   join. No mutex is needed for disjoint writes.
+- `SubWorkflow` runs a nested workflow as a single node. It shares the parent's
+  state and counts as one opaque step against the parent's `MaxSteps` budget.
+  The sub-workflow has its own internal step budget. On failure, a
+  `flow.SubWorkflowError` is returned with the sub-workflow's trace attached,
+  so the parent can debug what happened inside using `flow.MatchAs` or
+  `flow.MatchIs` on `Catch` routes. Sub-workflows can be nested to any depth.
 - `Wait` is a context-aware timer. Cancellation produces `StatusCanceled`.
 - `Succeed` and `Fail` are terminal and cannot have outgoing edges.
 

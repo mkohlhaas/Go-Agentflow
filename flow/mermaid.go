@@ -100,6 +100,7 @@ func (w *Workflow[T]) Mermaid() string {
 	b.WriteString(`    classDef parallel fill:#f3e8ff,stroke:#9333ea,color:#4c1d95;` + "\n")
 	b.WriteString(`    classDef wait fill:#f1f5f9,stroke:#64748b,color:#1e293b;` + "\n")
 	b.WriteString(`    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;` + "\n")
+	b.WriteString(`    classDef subworkflow fill:#f0fdf4,stroke:#15803d,color:#14532d;` + "\n")
 	b.WriteString(`    classDef succeed fill:#dcfce7,stroke:#16a34a,color:#14532d;` + "\n")
 	b.WriteString(`    classDef fail fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;` + "\n")
 	b.WriteString(`    classDef branch fill:#faf5ff,stroke:#a855f7,color:#581c87;` + "\n")
@@ -112,6 +113,8 @@ func nodeShape(id, label string, kind NodeKind) string {
 		return fmt.Sprintf("%s{\"%s\"}", id, label)
 	case KindDecision:
 		return fmt.Sprintf("%s{{\"%s\"}}", id, label)
+	case KindSubWorkflow:
+		return fmt.Sprintf("%s[[\"%s\"]]", id, label)
 	default:
 		return fmt.Sprintf("%s[\"%s\"]", id, label)
 	}
@@ -148,6 +151,11 @@ func typeLabel[T any](node *Node[T]) string {
 			return fmt.Sprintf("agent loop / %d tools", len(node.Agent.Tools))
 		}
 		return "agent loop"
+	case KindSubWorkflow:
+		if node.SubWorkflow != nil {
+			return fmt.Sprintf("sub-workflow / %d nodes", len(node.SubWorkflow.order))
+		}
+		return "sub-workflow"
 	case KindSucceed:
 		return "succeed"
 	case KindFail:
@@ -171,6 +179,8 @@ func classFor(kind NodeKind) string {
 		return "wait"
 	case KindAgent:
 		return "agent"
+	case KindSubWorkflow:
+		return "subworkflow"
 	case KindSucceed:
 		return "succeed"
 	case KindFail:
