@@ -476,6 +476,110 @@ func (w *Workflow[T]) Validate() error {
 			return fmt.Errorf("flow: workflow %q: %w", w.Name, err)
 		}
 	}
+	if err := w.validateGraphStructure(); err != nil {
+		return fmt.Errorf("flow: workflow %q: %w", w.Name, err)
+	}
+	return nil
+}
+
+// validateGraphStructure performs whole-graph checks that span multiple nodes:
+// it reports nodes unreachable from the start node, and reachable nodes that
+// cannot reach any terminal node (Succeed or Fail), which would indicate a
+// potential infinite loop.
+func (w *Workflow[T]) validateGraphStructure() error {
+	// Build adjacency: node name -> set of target names (all possible edges).
+	adj := make(map[string]map[string]bool, len(w.order))
+	for _, name := range w.order {
+		node := w.nodes[name]
+		targets := make(map[string]bool)
+		if node.NextNode != "" {
+			targets[node.NextNode] = true
+		}
+		for _, target := range node.Routes {
+			targets[target] = true
+		}
+		for _, route := range node.ErrorRoutes {
+			targets[route.Target] = true
+		}
+		adj[name] = targets
+	}
+
+	// Forward BFS from start: find all reachable nodes.
+	reachable := make(map[string]bool, len(w.order))
+	queue := []string{w.start}
+	reachable[w.start] = true
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for target := range adj[current] {
+			if !reachable[target] {
+				reachable[target] = true
+				queue = append(queue, target)
+			}
+		}
+	}
+
+	// Report unreachable nodes.
+	var unreachable []string
+	for _, name := range w.order {
+		if !reachable[name] {
+			unreachable = append(unreachable, name)
+		}
+	}
+	if len(unreachable) > 0 {
+		return fmt.Errorf("nodes unreachable from start node %q: %v", w.start, unreachable)
+	}
+
+	// Identify terminal nodes.
+	terminals := make(map[string]bool)
+	for _, name := range w.order {
+		if w.nodes[name].Kind == KindSucceed || w.nodes[name].Kind == KindFail {
+			terminals[name] = true
+		}
+	}
+	if len(terminals) == 0 {
+		return fmt.Errorf("no terminal node (Succeed or Fail) in workflow")
+	}
+
+	// Build reverse adjacency: target -> set of sources.
+	revAdj := make(map[string]map[string]bool, len(w.order))
+	for source, targets := range adj {
+		for target := range targets {
+			if revAdj[target] == nil {
+				revAdj[target] = make(map[string]bool)
+			}
+			revAdj[target][source] = true
+		}
+	}
+
+	// Reverse BFS from terminals: find all nodes that can reach a terminal.
+	canReachTerminal := make(map[string]bool, len(w.order))
+	queue = nil
+	for terminal := range terminals {
+		canReachTerminal[terminal] = true
+		queue = append(queue, terminal)
+	}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for source := range revAdj[current] {
+			if !canReachTerminal[source] {
+				canReachTerminal[source] = true
+				queue = append(queue, source)
+			}
+		}
+	}
+
+	// Report reachable nodes that cannot reach any terminal (potential dead loops).
+	var deadEnds []string
+	for _, name := range w.order {
+		if reachable[name] && !canReachTerminal[name] {
+			deadEnds = append(deadEnds, name)
+		}
+	}
+	if len(deadEnds) > 0 {
+		return fmt.Errorf("nodes cannot reach any terminal node (potential infinite loop): %v", deadEnds)
+	}
 	return nil
 }
 

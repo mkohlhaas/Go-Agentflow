@@ -216,8 +216,8 @@ func TestFailNodeEndsWorkflow(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "deliberate stop") {
 		t.Fatalf("error = %v, want deliberate stop", err)
 	}
-	if res.Status != flow.StatusFailed || res.LastNode != "give-up" {
-		t.Fatalf("result = %+v, want failed at give-up", res)
+	if res.Status != flow.StatusBusinessFailed || res.LastNode != "give-up" {
+		t.Fatalf("result = %+v, want business-failed at give-up", res)
 	}
 	if got := res.Trace[len(res.Trace)-1].Kind; got != flow.EventWorkflowFailed {
 		t.Fatalf("last event = %q, want workflow_failed", got)
@@ -535,7 +535,14 @@ func TestMaxStepsProtectsLoops(t *testing.T) {
 	wf.Task("loop", func(_ context.Context, s *seqState) error {
 		s.Value++
 		return nil
-	}).Next("loop")
+	}).Next("check")
+	wf.Choice("check", func(_ context.Context, s *seqState) (string, error) {
+		if s.Value < 3 {
+			return "loop", nil
+		}
+		return "done", nil
+	}).When("loop", "loop").When("done", "done")
+	wf.Succeed("done")
 
 	var state seqState
 	res, err := wf.Run(context.Background(), &state, flow.WithMaxSteps(3))
@@ -545,8 +552,8 @@ func TestMaxStepsProtectsLoops(t *testing.T) {
 	if res.Steps != 3 {
 		t.Fatalf("Steps = %d, want 3", res.Steps)
 	}
-	if state.Value != 3 {
-		t.Fatalf("Value = %d, want 3", state.Value)
+	if state.Value != 2 {
+		t.Fatalf("Value = %d, want 2", state.Value)
 	}
 }
 
@@ -711,6 +718,83 @@ func TestParallelIsolatedRequiresMerge(t *testing.T) {
 	_, err := wf.Run(context.Background(), &state)
 	if err == nil || !strings.Contains(err.Error(), "parallel copy requires a merge function") {
 		t.Fatalf("error = %v, want merge required", err)
+	}
+}
+
+func TestValidateDetectsUnreachableNodes(t *testing.T) {
+	wf := flow.New[seqState]("unreachable")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("done")
+	wf.Task("orphan", func(context.Context, *seqState) error { return nil }).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	_, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "unreachable") {
+		t.Fatalf("error = %v, want unreachable node error", err)
+	}
+	if !strings.Contains(err.Error(), "orphan") {
+		t.Fatalf("error = %v, want to mention orphan node", err)
+	}
+}
+
+func TestValidateDetectsDeadLoop(t *testing.T) {
+	wf := flow.New[seqState]("dead-loop")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("split")
+	split := wf.Choice("split", func(context.Context, *seqState) (string, error) { return "bad", nil })
+	split.When("good", "good").When("bad", "bad1")
+	wf.Task("good", func(context.Context, *seqState) error { return nil }).Next("done")
+	wf.Succeed("done")
+	wf.Task("bad1", func(context.Context, *seqState) error { return nil }).Next("bad2")
+	wf.Task("bad2", func(context.Context, *seqState) error { return nil }).Next("bad1")
+
+	var state seqState
+	_, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "cannot reach any terminal") {
+		t.Fatalf("error = %v, want dead loop error", err)
+	}
+}
+
+func TestValidateDetectsMissingTerminal(t *testing.T) {
+	wf := flow.New[seqState]("no-terminal")
+	wf.Task("a", func(context.Context, *seqState) error { return nil }).Next("b")
+	wf.Task("b", func(context.Context, *seqState) error { return nil }).Next("a")
+
+	var state seqState
+	_, err := wf.Run(context.Background(), &state)
+	if err == nil || !strings.Contains(err.Error(), "no terminal node") {
+		t.Fatalf("error = %v, want missing terminal error", err)
+	}
+}
+
+func TestValidateGraphStructureAllowsValidGraph(t *testing.T) {
+	wf := flow.New[seqState]("valid")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("choice")
+	wf.Choice("choice", func(context.Context, *seqState) (string, error) { return "done", nil }).
+		When("done", "done")
+	wf.Succeed("done")
+
+	var state seqState
+	_, err := wf.Run(context.Background(), &state)
+	if err != nil {
+		t.Fatalf("error = %v, want no error", err)
+	}
+}
+
+func TestFailNodeReturnsBusinessFailedStatus(t *testing.T) {
+	wf := flow.New[seqState]("explicit-fail")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("give-up")
+	wf.Fail("give-up", "deliberate stop")
+
+	var state seqState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil {
+		t.Fatal("expected error from Fail node")
+	}
+	if res.Status != flow.StatusBusinessFailed {
+		t.Fatalf("status = %q, want %q", res.Status, flow.StatusBusinessFailed)
+	}
+	if !strings.Contains(err.Error(), "deliberate stop") {
+		t.Fatalf("error = %v, want deliberate stop", err)
 	}
 }
 

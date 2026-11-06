@@ -16,6 +16,9 @@ const (
 	StatusSucceeded Status = "succeeded"
 	// StatusFailed means a node failed and no error route handled it.
 	StatusFailed Status = "failed"
+	// StatusBusinessFailed means the workflow reached a Fail node as a
+	// deliberate business outcome (as opposed to an unhandled error).
+	StatusBusinessFailed Status = "business-failed"
 	// StatusCanceled means the caller's context ended the run.
 	StatusCanceled Status = "canceled"
 )
@@ -143,6 +146,12 @@ func (w *Workflow[T]) Run(ctx context.Context, state *T, opts ...RunOption) (*Re
 				msg = err.Error()
 			}
 			emit(Event{Kind: EventWorkflowCanceled, Node: node, Message: msg})
+		case StatusBusinessFailed:
+			msg := "workflow failed (business outcome)"
+			if err != nil {
+				msg = err.Error()
+			}
+			emit(Event{Kind: EventWorkflowFailed, Node: node, Message: msg})
 		default:
 			msg := "workflow failed"
 			if err != nil {
@@ -204,7 +213,7 @@ func (w *Workflow[T]) Run(ctx context.Context, state *T, opts ...RunOption) (*Re
 			}
 			emit(Event{Kind: EventNodeFailed, Node: node.Name, Step: step, Message: message})
 			res.Steps = step
-			return finish(StatusFailed, fmt.Errorf("node %q: %s", node.Name, message), node.Name)
+			return finish(StatusBusinessFailed, fmt.Errorf("node %q: %s", node.Name, message), node.Name)
 		}
 
 		emit(Event{Kind: EventNodeFinished, Node: node.Name, Step: step})

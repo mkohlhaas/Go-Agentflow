@@ -262,6 +262,40 @@ wf.SubWorkflow("process", sub).
 The attached trace lets you drill into what happened inside the sub-workflow
 without running it in isolation.
 
+### Graph validation
+
+`Validate()` (called automatically by `Run`) performs whole-graph checks in
+addition to per-node validation:
+
+- **Unreachable nodes:** Any node that cannot be reached from the start node
+  is reported as an error. This catches dead code and typos in route targets.
+- **Dead loops:** Any reachable node that cannot reach a terminal node
+  (`Succeed` or `Fail`) is reported as a potential infinite loop. This catches
+  cycles that would otherwise burn the `MaxSteps` budget at runtime.
+- **Missing terminal:** A workflow with no `Succeed` or `Fail` node is
+  rejected.
+
+These checks run before any node executes, so graph mistakes surface
+immediately rather than mid-run.
+
+### StatusBusinessFailed
+
+A `Fail` node now ends the workflow with `StatusBusinessFailed` (rather than
+`StatusFailed`). The error is still returned (the `FailMessage`), but callers
+can distinguish a deliberate business outcome from an unhandled system error
+by checking `res.Status`:
+
+```go
+if res.Status == flow.StatusBusinessFailed {
+    // The workflow ended at a Fail node — expected, not a bug.
+} else if res.Status == flow.StatusFailed {
+    // A node failed with no error route handling it — unexpected.
+}
+```
+
+Both statuses return a non-nil error, so existing `err != nil` checks
+continue to work.
+
 ### Observing a run
 
 ```go
