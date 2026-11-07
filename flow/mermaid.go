@@ -8,7 +8,7 @@ import (
 // Mermaid renders the workflow as a deterministic Mermaid flowchart. Node
 // declaration order is preserved, so repeated calls produce identical output.
 func (w *Workflow[T]) Mermaid() string {
-	ids := make(map[string]string, len(w.order))
+	ids := make(map[NodeName]string, len(w.order))
 	for i, name := range w.order {
 		ids[name] = fmt.Sprintf("n%d", i)
 	}
@@ -42,7 +42,7 @@ func (w *Workflow[T]) Mermaid() string {
 		fmt.Fprintf(&b, "    subgraph %s_par[\"%s\"]\n", id, escapeLabel("parallel branches"))
 		b.WriteString("        direction TB\n")
 		for i, branch := range node.Branches {
-			fmt.Fprintf(&b, "        %s_b%d[\"%s\"]\n", id, i, escapeLabel("branch: "+branch.Name))
+			fmt.Fprintf(&b, "        %s_b%d[\"%s\"]\n", id, i, escapeLabel("branch: "+string(branch.Name)))
 		}
 		b.WriteString("    end\n")
 	}
@@ -123,9 +123,9 @@ func nodeShape(id, label string, kind NodeKind) string {
 func nodeLabel[T any](node *Node[T]) string {
 	kind := typeLabel(node)
 	if kind != "" {
-		return escapeLabel(node.Name) + "<br/><small>" + escapeLabel(kind) + "</small>"
+		return escapeLabel(string(node.Name)) + "<br/><small>" + escapeLabel(kind) + "</small>"
 	}
-	return escapeLabel(node.Name)
+	return escapeLabel(string(node.Name))
 }
 
 func typeLabel[T any](node *Node[T]) string {

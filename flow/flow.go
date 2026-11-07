@@ -49,6 +49,21 @@ const (
 // as an explicit Decision option key.
 const DefaultRoute = "default"
 
+// NodeName uniquely identifies a node within a workflow. It is a defined type
+// (not a bare alias) so node names cannot be confused with route keys or other
+// string-valued identifiers.
+//
+// Untyped string constants convert implicitly, so string literals work at call
+// sites without a cast:
+//
+//	wf.Task("build", fn).Next("triage")   // "build" and "triage" become NodeName
+//
+// When a node name lives in a string variable, convert it explicitly:
+//
+//	var n string = "build"
+//	wf.Task(NodeName(n), fn)
+type NodeName string
+
 // DefaultMaxSteps bounds the number of node visits in a single run. Loops are
 // allowed, so this is the primary protection against a runaway graph.
 const DefaultMaxSteps = 1000
@@ -79,7 +94,7 @@ type RetryPolicy struct {
 // ErrorRoute sends a node failure to another node instead of ending the run.
 type ErrorRoute struct {
 	// Target is the node to run when Match accepts the error.
-	Target string
+	Target NodeName
 	// Match decides whether this route applies. A nil Match accepts any error.
 	Match func(error) bool
 }
@@ -110,7 +125,7 @@ func (e *SubWorkflowError) Unwrap() error { return e.Err }
 type RouteOption struct {
 	Key         string
 	Description string
-	Target      string
+	Target      NodeName
 }
 
 // MatchIs returns an ErrorRoute match function that matches errors using
@@ -228,14 +243,14 @@ type AgentSpec[T any] struct {
 // state, so concurrent branches must not mutate the same fields without their
 // own synchronisation.
 type Branch[T any] struct {
-	Name string
+	Name NodeName
 	Run  func(context.Context, *T) error
 }
 
 // Node is a single vertex in a workflow.
 type Node[T any] struct {
 	// Name uniquely identifies the node in its workflow.
-	Name string
+	Name NodeName
 	Kind NodeKind
 
 	Task     TaskFunc[T]
@@ -246,9 +261,9 @@ type Node[T any] struct {
 	Agent    *AgentSpec[T]
 
 	// Next is the destination for Task, Parallel, Wait and Agent nodes.
-	NextNode string
+	NextNode NodeName
 	// Routes maps route keys to destinations for Choice and Decision nodes.
-	Routes map[string]string
+	Routes map[string]NodeName
 	// RouteKeys preserves declaration order for deterministic rendering.
 	RouteKeys []string
 
@@ -276,9 +291,9 @@ type Workflow[T any] struct {
 	// Name is used in results and diagram headers.
 	Name string
 
-	nodes map[string]*Node[T]
-	order []string
-	start string
+	nodes map[NodeName]*Node[T]
+	order []NodeName
+	start NodeName
 }
 
 // New creates an empty workflow. The first node added becomes the start node
@@ -286,30 +301,30 @@ type Workflow[T any] struct {
 func New[T any](name string) *Workflow[T] {
 	return &Workflow[T]{
 		Name:  name,
-		nodes: make(map[string]*Node[T]),
+		nodes: make(map[NodeName]*Node[T]),
 	}
 }
 
 // StartAt sets the node where execution begins.
-func (w *Workflow[T]) StartAt(name string) *Workflow[T] {
+func (w *Workflow[T]) StartAt(name NodeName) *Workflow[T] {
 	w.start = name
 	return w
 }
 
 // Start returns the configured start node name.
-func (w *Workflow[T]) Start() string {
+func (w *Workflow[T]) Start() NodeName {
 	return w.start
 }
 
 // Nodes returns node names in declaration order.
-func (w *Workflow[T]) Nodes() []string {
-	out := make([]string, len(w.order))
+func (w *Workflow[T]) Nodes() []NodeName {
+	out := make([]NodeName, len(w.order))
 	copy(out, w.order)
 	return out
 }
 
 // Node returns a node by name, or nil when it does not exist.
-func (w *Workflow[T]) Node(name string) *Node[T] {
+func (w *Workflow[T]) Node(name NodeName) *Node[T] {
 	return w.nodes[name]
 }
 
@@ -321,7 +336,7 @@ func (w *Workflow[T]) add(n *Node[T]) *Node[T] {
 		panic(fmt.Sprintf("flow: duplicate node %q", n.Name))
 	}
 	n.workflow = w
-	n.Routes = make(map[string]string)
+	n.Routes = make(map[string]NodeName)
 	w.nodes[n.Name] = n
 	w.order = append(w.order, n.Name)
 	if w.start == "" {
@@ -331,18 +346,18 @@ func (w *Workflow[T]) add(n *Node[T]) *Node[T] {
 }
 
 // Task adds a Task node.
-func (w *Workflow[T]) Task(name string, fn TaskFunc[T]) *Node[T] {
+func (w *Workflow[T]) Task(name NodeName, fn TaskFunc[T]) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindTask, Task: fn})
 }
 
 // Choice adds a deterministic Choice node. Declare destinations with When and
 // Otherwise.
-func (w *Workflow[T]) Choice(name string, fn ChoiceFunc[T]) *Node[T] {
+func (w *Workflow[T]) Choice(name NodeName, fn ChoiceFunc[T]) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindChoice, Choice: fn})
 }
 
 // Decision adds a Decision node whose route is selected by a policy.
-func (w *Workflow[T]) Decision(name string, spec DecisionSpec[T]) *Node[T] {
+func (w *Workflow[T]) Decision(name NodeName, spec DecisionSpec[T]) *Node[T] {
 	n := &Node[T]{Name: name, Kind: KindDecision, Decision: &spec}
 	w.add(n)
 	for _, opt := range spec.Options {
@@ -352,12 +367,12 @@ func (w *Workflow[T]) Decision(name string, spec DecisionSpec[T]) *Node[T] {
 }
 
 // Parallel adds a Parallel node.
-func (w *Workflow[T]) Parallel(name string, branches ...Branch[T]) *Node[T] {
+func (w *Workflow[T]) Parallel(name NodeName, branches ...Branch[T]) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindParallel, Branches: branches})
 }
 
 // Wait adds a Wait node.
-func (w *Workflow[T]) Wait(name string, delay time.Duration) *Node[T] {
+func (w *Workflow[T]) Wait(name NodeName, delay time.Duration) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindWait, Delay: delay})
 }
 
@@ -369,7 +384,7 @@ func (w *Workflow[T]) Wait(name string, delay time.Duration) *Node[T] {
 // Use this when branches write to overlapping state fields and you want to
 // avoid mutexes. Copy must return a deep copy of state; Merge receives the
 // main state and all branch copies and should fold the results back in.
-func (w *Workflow[T]) ParallelIsolated(name string, copy func(*T) *T, merge func(main *T, copies []*T) error, branches ...Branch[T]) *Node[T] {
+func (w *Workflow[T]) ParallelIsolated(name NodeName, copy func(*T) *T, merge func(main *T, copies []*T) error, branches ...Branch[T]) *Node[T] {
 	n := &Node[T]{
 		Name:          name,
 		Kind:          KindParallel,
@@ -381,7 +396,7 @@ func (w *Workflow[T]) ParallelIsolated(name string, copy func(*T) *T, merge func
 }
 
 // Agent adds an Agent node.
-func (w *Workflow[T]) Agent(name string, spec AgentSpec[T]) *Node[T] {
+func (w *Workflow[T]) Agent(name NodeName, spec AgentSpec[T]) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindAgent, Agent: &spec})
 }
 
@@ -389,29 +404,29 @@ func (w *Workflow[T]) Agent(name string, spec AgentSpec[T]) *Node[T] {
 // synchronously and shares the parent's state. On completion, the parent
 // continues at NextNode. On failure, a SubWorkflowError is returned with the
 // sub-workflow's trace attached. Sub-workflows can be nested to any depth.
-func (w *Workflow[T]) SubWorkflow(name string, sub *Workflow[T]) *Node[T] {
+func (w *Workflow[T]) SubWorkflow(name NodeName, sub *Workflow[T]) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindSubWorkflow, SubWorkflow: sub})
 }
 
 // Succeed adds a terminal successful node.
-func (w *Workflow[T]) Succeed(name string) *Node[T] {
+func (w *Workflow[T]) Succeed(name NodeName) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindSucceed})
 }
 
 // Fail adds a terminal failing node.
-func (w *Workflow[T]) Fail(name, message string) *Node[T] {
+func (w *Workflow[T]) Fail(name NodeName, message string) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindFail, FailMessage: message})
 }
 
 // Next sets the destination for Task, Parallel, Wait and Agent nodes.
-func (n *Node[T]) Next(target string) *Node[T] {
+func (n *Node[T]) Next(target NodeName) *Node[T] {
 	n.NextNode = target
 	return n
 }
 
 // When declares a Choice or Decision route. It panics on duplicate keys so
 // definition mistakes surface while the graph is built.
-func (n *Node[T]) When(key, target string) *Node[T] {
+func (n *Node[T]) When(key string, target NodeName) *Node[T] {
 	if key == "" {
 		panic(fmt.Sprintf("flow: node %q: route key must not be empty", n.Name))
 	}
@@ -420,12 +435,12 @@ func (n *Node[T]) When(key, target string) *Node[T] {
 }
 
 // Otherwise declares the fallback Choice route.
-func (n *Node[T]) Otherwise(target string) *Node[T] {
+func (n *Node[T]) Otherwise(target NodeName) *Node[T] {
 	n.route(DefaultRoute, target)
 	return n
 }
 
-func (n *Node[T]) route(key, target string) {
+func (n *Node[T]) route(key string, target NodeName) {
 	if key == "" {
 		panic(fmt.Sprintf("flow: node %q: route key must not be empty", n.Name))
 	}
@@ -433,7 +448,7 @@ func (n *Node[T]) route(key, target string) {
 		panic(fmt.Sprintf("flow: node %q: route %q has no target", n.Name, key))
 	}
 	if n.Routes == nil {
-		n.Routes = make(map[string]string)
+		n.Routes = make(map[string]NodeName)
 	}
 	if _, exists := n.Routes[key]; exists {
 		panic(fmt.Sprintf("flow: node %q: duplicate route %q", n.Name, key))
@@ -451,7 +466,7 @@ func (n *Node[T]) WithRetry(policy RetryPolicy) *Node[T] {
 
 // Catch routes matching errors to target instead of failing the workflow.
 // Routes are checked in declaration order; a nil match accepts any error.
-func (n *Node[T]) Catch(target string, match func(error) bool) *Node[T] {
+func (n *Node[T]) Catch(target NodeName, match func(error) bool) *Node[T] {
 	n.ErrorRoutes = append(n.ErrorRoutes, ErrorRoute{Target: target, Match: match})
 	return n
 }
@@ -488,10 +503,10 @@ func (w *Workflow[T]) Validate() error {
 // potential infinite loop.
 func (w *Workflow[T]) validateGraphStructure() error {
 	// Build adjacency: node name -> set of target names (all possible edges).
-	adj := make(map[string]map[string]bool, len(w.order))
+	adj := make(map[NodeName]map[NodeName]bool, len(w.order))
 	for _, name := range w.order {
 		node := w.nodes[name]
-		targets := make(map[string]bool)
+		targets := make(map[NodeName]bool)
 		if node.NextNode != "" {
 			targets[node.NextNode] = true
 		}
@@ -505,8 +520,8 @@ func (w *Workflow[T]) validateGraphStructure() error {
 	}
 
 	// Forward BFS from start: find all reachable nodes.
-	reachable := make(map[string]bool, len(w.order))
-	queue := []string{w.start}
+	reachable := make(map[NodeName]bool, len(w.order))
+	queue := []NodeName{w.start}
 	reachable[w.start] = true
 	for len(queue) > 0 {
 		current := queue[0]
@@ -520,7 +535,7 @@ func (w *Workflow[T]) validateGraphStructure() error {
 	}
 
 	// Report unreachable nodes.
-	var unreachable []string
+	var unreachable []NodeName
 	for _, name := range w.order {
 		if !reachable[name] {
 			unreachable = append(unreachable, name)
@@ -531,7 +546,7 @@ func (w *Workflow[T]) validateGraphStructure() error {
 	}
 
 	// Identify terminal nodes.
-	terminals := make(map[string]bool)
+	terminals := make(map[NodeName]bool)
 	for _, name := range w.order {
 		if w.nodes[name].Kind == KindSucceed || w.nodes[name].Kind == KindFail {
 			terminals[name] = true
@@ -542,18 +557,18 @@ func (w *Workflow[T]) validateGraphStructure() error {
 	}
 
 	// Build reverse adjacency: target -> set of sources.
-	revAdj := make(map[string]map[string]bool, len(w.order))
+	revAdj := make(map[NodeName]map[NodeName]bool, len(w.order))
 	for source, targets := range adj {
 		for target := range targets {
 			if revAdj[target] == nil {
-				revAdj[target] = make(map[string]bool)
+				revAdj[target] = make(map[NodeName]bool)
 			}
 			revAdj[target][source] = true
 		}
 	}
 
 	// Reverse BFS from terminals: find all nodes that can reach a terminal.
-	canReachTerminal := make(map[string]bool, len(w.order))
+	canReachTerminal := make(map[NodeName]bool, len(w.order))
 	queue = nil
 	for terminal := range terminals {
 		canReachTerminal[terminal] = true
@@ -571,7 +586,7 @@ func (w *Workflow[T]) validateGraphStructure() error {
 	}
 
 	// Report reachable nodes that cannot reach any terminal (potential dead loops).
-	var deadEnds []string
+	var deadEnds []NodeName
 	for _, name := range w.order {
 		if reachable[name] && !canReachTerminal[name] {
 			deadEnds = append(deadEnds, name)
@@ -631,7 +646,7 @@ func (n *Node[T]) validate() error {
 		if len(n.Branches) == 0 {
 			return fmt.Errorf("node %q: parallel has no branches", n.Name)
 		}
-		seen := make(map[string]bool, len(n.Branches))
+		seen := make(map[NodeName]bool, len(n.Branches))
 		for _, b := range n.Branches {
 			if b.Name == "" {
 				return fmt.Errorf("node %q: parallel branch has no name", n.Name)
@@ -749,7 +764,7 @@ func (n *Node[T]) validate() error {
 	return nil
 }
 
-func (n *Node[T]) checkTarget(target string) error {
+func (n *Node[T]) checkTarget(target NodeName) error {
 	if target == "" {
 		return fmt.Errorf("target must not be empty")
 	}

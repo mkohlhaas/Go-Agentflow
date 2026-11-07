@@ -156,6 +156,19 @@ node.WithRetry(flow.RetryPolicy{...})
 node.Catch("target", func(err error) bool { ... })
 ```
 
+Node names use `flow.NodeName`, a defined string type. String literals convert implicitly:
+
+```go
+wf.Task("build", fn).Next("triage")   // "build" and "triage" become NodeName
+```
+
+When a name comes from a `string` variable, convert it explicitly:
+
+```go
+var n string = "build"
+wf.Task(flow.NodeName(n), fn)
+```
+
 Builder mistakes such as duplicate node names, duplicate route keys, empty route
 keys and missing route targets panic immediately. Cross-node problems such as a
 destination that does not exist are reported by `Validate`, which `Run` calls

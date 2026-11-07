@@ -133,31 +133,31 @@ func (w *Workflow[T]) Run(ctx context.Context, state *T, opts ...RunOption) (*Re
 			cfg.observer(ev)
 		}
 	}
-	finish := func(status Status, err error, node string) (*Result[T], error) {
+	finish := func(status Status, err error, node NodeName) (*Result[T], error) {
 		res.Status = status
 		res.Err = err
-		res.LastNode = node
+		res.LastNode = string(node)
 		switch status {
 		case StatusSucceeded:
-			emit(Event{Kind: EventWorkflowFinished, Node: node, Message: "workflow succeeded"})
+			emit(Event{Kind: EventWorkflowFinished, Node: string(node), Message: "workflow succeeded"})
 		case StatusCanceled:
 			msg := "workflow canceled"
 			if err != nil {
 				msg = err.Error()
 			}
-			emit(Event{Kind: EventWorkflowCanceled, Node: node, Message: msg})
+			emit(Event{Kind: EventWorkflowCanceled, Node: string(node), Message: msg})
 		case StatusBusinessFailed:
 			msg := "workflow failed (business outcome)"
 			if err != nil {
 				msg = err.Error()
 			}
-			emit(Event{Kind: EventWorkflowFailed, Node: node, Message: msg})
+			emit(Event{Kind: EventWorkflowFailed, Node: string(node), Message: msg})
 		default:
 			msg := "workflow failed"
 			if err != nil {
 				msg = err.Error()
 			}
-			emit(Event{Kind: EventWorkflowFailed, Node: node, Message: msg})
+			emit(Event{Kind: EventWorkflowFailed, Node: string(node), Message: msg})
 		}
 		return res, err
 	}
@@ -182,7 +182,7 @@ func (w *Workflow[T]) Run(ctx context.Context, state *T, opts ...RunOption) (*Re
 
 		step++
 		res.Steps = step
-		emit(Event{Kind: EventNodeStarted, Node: node.Name, Step: step})
+		emit(Event{Kind: EventNodeStarted, Node: string(node.Name), Step: step})
 
 		next, err := w.executeNode(ctx, node, state, step, emit)
 		if err != nil {
@@ -190,11 +190,11 @@ func (w *Workflow[T]) Run(ctx context.Context, state *T, opts ...RunOption) (*Re
 				res.Steps = step
 				return finish(StatusCanceled, ctxErr, node.Name)
 			}
-			emit(Event{Kind: EventNodeFailed, Node: node.Name, Step: step, Message: err.Error()})
+			emit(Event{Kind: EventNodeFailed, Node: string(node.Name), Step: step, Message: err.Error()})
 			if target, handled := matchErrorRoute(node, err); handled {
 				emit(Event{
 					Kind:    EventRouteSelected,
-					Node:    node.Name,
+					Node:    string(node.Name),
 					Step:    step,
 					Route:   "error",
 					Message: err.Error(),
@@ -211,12 +211,12 @@ func (w *Workflow[T]) Run(ctx context.Context, state *T, opts ...RunOption) (*Re
 			if message == "" {
 				message = "workflow failed"
 			}
-			emit(Event{Kind: EventNodeFailed, Node: node.Name, Step: step, Message: message})
+			emit(Event{Kind: EventNodeFailed, Node: string(node.Name), Step: step, Message: message})
 			res.Steps = step
 			return finish(StatusBusinessFailed, fmt.Errorf("node %q: %s", node.Name, message), node.Name)
 		}
 
-		emit(Event{Kind: EventNodeFinished, Node: node.Name, Step: step})
+		emit(Event{Kind: EventNodeFinished, Node: string(node.Name), Step: step})
 
 		if node.Kind == KindSucceed {
 			res.Steps = step
@@ -236,7 +236,7 @@ func (w *Workflow[T]) executeNode(
 	state *T,
 	step int,
 	emit func(Event),
-) (string, error) {
+) (NodeName, error) {
 	switch node.Kind {
 	case KindTask:
 		if err := runTask(ctx, node, state, step, emit); err != nil {
@@ -303,7 +303,7 @@ func runTask[T any](
 		}
 		emit(Event{
 			Kind:    EventRetry,
-			Node:    node.Name,
+			Node:    string(node.Name),
 			Step:    step,
 			Attempt: attempt + 1,
 			Message: lastErr.Error(),
@@ -348,7 +348,7 @@ func runChoice[T any](
 	state *T,
 	step int,
 	emit func(Event),
-) (string, error) {
+) (NodeName, error) {
 	key, err := node.Choice(ctx, state)
 	if err != nil {
 		return "", err
@@ -360,7 +360,7 @@ func runChoice[T any](
 	if !ok {
 		return "", fmt.Errorf("choice returned unknown route %q (declared: %v)", key, node.RouteKeys)
 	}
-	emit(Event{Kind: EventRouteSelected, Node: node.Name, Step: step, Route: key})
+	emit(Event{Kind: EventRouteSelected, Node: string(node.Name), Step: step, Route: key})
 	return target, nil
 }
 
@@ -370,7 +370,7 @@ func runDecision[T any](
 	state *T,
 	step int,
 	emit func(Event),
-) (string, error) {
+) (NodeName, error) {
 	spec := node.Decision
 	attempts := max(spec.MaxAttempts, 1)
 
@@ -385,7 +385,7 @@ func runDecision[T any](
 			lastErr = fmt.Errorf("decision returned unknown option %q (declared: %v)", key, node.RouteKeys)
 			emit(Event{
 				Kind:    EventDecisionRejected,
-				Node:    node.Name,
+				Node:    string(node.Name),
 				Step:    step,
 				Attempt: attempt,
 				Route:   key,
@@ -395,7 +395,7 @@ func runDecision[T any](
 		}
 		emit(Event{
 			Kind:    EventRouteSelected,
-			Node:    node.Name,
+			Node:    string(node.Name),
 			Step:    step,
 			Attempt: attempt,
 			Route:   key,
@@ -435,7 +435,7 @@ func runParallelShared[T any](
 	var cancelOnce sync.Once
 	for i := range node.Branches {
 		branch := node.Branches[i]
-		emit(Event{Kind: EventBranchStarted, Node: node.Name, Branch: branch.Name, Step: step})
+		emit(Event{Kind: EventBranchStarted, Node: string(node.Name), Branch: string(branch.Name), Step: step})
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -474,7 +474,7 @@ func runParallelIsolated[T any](
 	var cancelOnce sync.Once
 	for i := range node.Branches {
 		branch := node.Branches[i]
-		emit(Event{Kind: EventBranchStarted, Node: node.Name, Branch: branch.Name, Step: step})
+		emit(Event{Kind: EventBranchStarted, Node: string(node.Name), Branch: string(branch.Name), Step: step})
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -513,14 +513,14 @@ func finishParallel[T any](
 		if errs[i] != nil {
 			emit(Event{
 				Kind:    EventBranchFailed,
-				Node:    node.Name,
-				Branch:  branch.Name,
+				Node:    string(node.Name),
+				Branch:  string(branch.Name),
 				Step:    step,
 				Message: errs[i].Error(),
 			})
 			continue
 		}
-		emit(Event{Kind: EventBranchFinished, Node: node.Name, Branch: branch.Name, Step: step})
+		emit(Event{Kind: EventBranchFinished, Node: string(node.Name), Branch: string(branch.Name), Step: step})
 	}
 
 	var cancelErr error
@@ -562,15 +562,15 @@ func runSubWorkflow[T any](
 	state *T,
 	step int,
 	emit func(Event),
-) (string, error) {
+) (NodeName, error) {
 	sub := node.SubWorkflow
 	if sub == nil {
-		return "", fmt.Errorf("node %q: sub-workflow is nil", node.Name)
+		return "", fmt.Errorf("node %q: sub-workflow is nil", string(node.Name))
 	}
 
 	emit(Event{
 		Kind: EventNodeStarted,
-		Node: node.Name,
+		Node: string(node.Name),
 		Step: step,
 	})
 
@@ -594,7 +594,7 @@ func runSubWorkflow[T any](
 
 	emit(Event{
 		Kind: EventNodeFinished,
-		Node: node.Name,
+		Node: string(node.Name),
 		Step: step,
 	})
 
@@ -628,7 +628,7 @@ func runAgent[T any](
 		if decision.Thought != "" {
 			emit(Event{
 				Kind:    EventAgentThought,
-				Node:    node.Name,
+				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
 				Message: decision.Thought,
@@ -647,7 +647,7 @@ func runAgent[T any](
 		if decision.Done {
 			emit(Event{
 				Kind:    EventAgentFinished,
-				Node:    node.Name,
+				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
 				Message: decision.Message,
@@ -666,7 +666,7 @@ func runAgent[T any](
 			history = append(history, turn)
 			emit(Event{
 				Kind:    EventToolRejected,
-				Node:    node.Name,
+				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
 				Message: turn.Error,
@@ -680,7 +680,7 @@ func runAgent[T any](
 			history = append(history, turn)
 			emit(Event{
 				Kind:    EventToolRejected,
-				Node:    node.Name,
+				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
 				Tool:    decision.Tool,
@@ -691,7 +691,7 @@ func runAgent[T any](
 
 		emit(Event{
 			Kind:    EventToolStarted,
-			Node:    node.Name,
+			Node:    string(node.Name),
 			Step:    step,
 			Attempt: i,
 			Tool:    decision.Tool,
@@ -702,7 +702,7 @@ func runAgent[T any](
 			turn.Error = err.Error()
 			emit(Event{
 				Kind:    EventToolFailed,
-				Node:    node.Name,
+				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
 				Tool:    decision.Tool,
@@ -711,7 +711,7 @@ func runAgent[T any](
 		} else {
 			emit(Event{
 				Kind:    EventToolFinished,
-				Node:    node.Name,
+				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
 				Tool:    decision.Tool,
@@ -723,7 +723,7 @@ func runAgent[T any](
 	return fmt.Errorf("%w: node %q hit limit %d", ErrAgentIterations, node.Name, iterations)
 }
 
-func matchErrorRoute[T any](node *Node[T], err error) (string, bool) {
+func matchErrorRoute[T any](node *Node[T], err error) (NodeName, bool) {
 	for _, route := range node.ErrorRoutes {
 		if route.Match == nil || route.Match(err) {
 			return route.Target, true
