@@ -26,8 +26,8 @@ const (
 var (
 	// ErrMaxSteps is returned when a run exceeds its node-visit budget.
 	ErrMaxSteps = errors.New("workflow exceeded maximum steps")
-	// ErrAgentIterations is returned when an agent loop exceeds its budget.
-	ErrAgentIterations = errors.New("agent exceeded maximum iterations")
+	// ErrToolLoopIterations is returned when a tool loop exceeds its budget.
+	ErrToolLoopIterations = errors.New("tool loop exceeded maximum iterations")
 )
 
 // EventKind identifies an execution trace event.
@@ -43,12 +43,12 @@ const (
 	EventBranchFailed     EventKind = "branch_failed"
 	EventRouteSelected    EventKind = "route_selected"
 	EventDecisionRejected EventKind = "decision_rejected"
-	EventAgentThought     EventKind = "agent_thought"
+	EventToolLoopThought  EventKind = "tool_loop_thought"
 	EventToolStarted      EventKind = "tool_started"
 	EventToolFinished     EventKind = "tool_finished"
 	EventToolFailed       EventKind = "tool_failed"
 	EventToolRejected     EventKind = "tool_rejected"
-	EventAgentFinished    EventKind = "agent_finished"
+	EventToolLoopFinished EventKind = "tool_loop_finished"
 	EventWorkflowFinished EventKind = "workflow_finished"
 	EventWorkflowFailed   EventKind = "workflow_failed"
 	EventWorkflowCanceled EventKind = "workflow_canceled"
@@ -262,8 +262,8 @@ func (w *Workflow[T]) executeNode(
 		}
 		return node.NextNode, nil
 
-	case KindAgent:
-		if err := runAgent(ctx, node, state, step, emit); err != nil {
+	case KindToolLoop:
+		if err := runToolLoop(ctx, node, state, step, emit); err != nil {
 			return "", err
 		}
 		return node.NextNode, nil
@@ -593,17 +593,17 @@ func runSubWorkflow[T any](
 	return node.NextNode, nil
 }
 
-func runAgent[T any](
+func runToolLoop[T any](
 	ctx context.Context,
 	node *Node[T],
 	state *T,
 	step int,
 	emit func(Event),
 ) error {
-	spec := node.Agent
+	spec := node.ToolLoop
 	iterations := spec.MaxIterations
 	if iterations == 0 {
-		iterations = DefaultMaxAgentIterations
+		iterations = DefaultMaxToolLoopIterations
 	}
 
 	tools := make(map[string]Tool[T], len(spec.Tools))
@@ -611,7 +611,7 @@ func runAgent[T any](
 		tools[tool.Name] = tool
 	}
 
-	history := make([]AgentTurn, 0, iterations)
+	history := make([]ToolLoopTurn, 0, iterations)
 	for i := 1; i <= iterations; i++ {
 		decision, err := spec.Policy.Next(ctx, state, history)
 		if err != nil {
@@ -619,7 +619,7 @@ func runAgent[T any](
 		}
 		if decision.Thought != "" {
 			emit(Event{
-				Kind:    EventAgentThought,
+				Kind:    EventToolLoopThought,
 				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
@@ -627,18 +627,18 @@ func runAgent[T any](
 			})
 		}
 		if decision.Done && decision.Fail {
-			return fmt.Errorf("agent returned both Done and Fail")
+			return fmt.Errorf("tool loop returned both Done and Fail")
 		}
 		if decision.Fail {
 			message := decision.Message
 			if message == "" {
-				message = "agent reported failure"
+				message = "tool loop reported failure"
 			}
 			return errors.New(message)
 		}
 		if decision.Done {
 			emit(Event{
-				Kind:    EventAgentFinished,
+				Kind:    EventToolLoopFinished,
 				Node:    string(node.Name),
 				Step:    step,
 				Attempt: i,
@@ -647,7 +647,7 @@ func runAgent[T any](
 			return nil
 		}
 
-		turn := AgentTurn{
+		turn := ToolLoopTurn{
 			Step:    i,
 			Thought: decision.Thought,
 			Tool:    decision.Tool,
@@ -712,7 +712,7 @@ func runAgent[T any](
 		}
 		history = append(history, turn)
 	}
-	return fmt.Errorf("%w: node %q hit limit %d", ErrAgentIterations, node.Name, iterations)
+	return fmt.Errorf("%w: node %q hit limit %d", ErrToolLoopIterations, node.Name, iterations)
 }
 
 func matchErrorRoute[T any](node *Node[T], err error) (NodeName, bool) {

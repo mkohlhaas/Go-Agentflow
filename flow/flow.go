@@ -2,7 +2,7 @@
 // need a fixed, visualizable control-flow graph with LLM-driven decisions.
 //
 // A workflow is built from typed nodes (Task, Choice, Decision, Parallel, Wait,
-// Agent, Succeed, Fail) that all operate on a single state value. The graph is
+// ToolLoop, Succeed, Fail) that all operate on a single state value. The graph is
 // static: an LLM may choose among declared routes or tool calls, but it cannot
 // invent new graph structure. That keeps runs inspectable and makes the Mermaid
 // export an accurate picture of what can happen.
@@ -35,8 +35,8 @@ const (
 	KindParallel NodeKind = "parallel"
 	// KindWait pauses for a fixed duration.
 	KindWait NodeKind = "wait"
-	// KindAgent runs an iterative tool-selection loop driven by a policy.
-	KindAgent NodeKind = "agent"
+	// KindToolLoop runs an iterative tool-selection loop driven by a policy.
+	KindToolLoop NodeKind = "tool-loop"
 	// KindSubWorkflow runs a nested workflow as a single node.
 	KindSubWorkflow NodeKind = "sub-workflow"
 	// KindSucceed ends the workflow successfully.
@@ -68,8 +68,8 @@ type NodeName string
 // allowed, so this is the primary protection against a runaway graph.
 const DefaultMaxSteps = 1000
 
-// DefaultMaxAgentIterations bounds an Agent node when MaxIterations is zero.
-const DefaultMaxAgentIterations = 8
+// DefaultMaxToolLoopIterations bounds a ToolLoop node when MaxIterations is zero.
+const DefaultMaxToolLoopIterations = 8
 
 // TaskFunc is the body of a Task node. It may mutate state directly.
 type TaskFunc[T any] func(context.Context, *T) error
@@ -182,7 +182,7 @@ type DecisionSpec[T any] struct {
 	MaxAttempts int
 }
 
-// Tool is a capability exposed to an Agent policy. Tools receive a string map
+// Tool is a capability exposed to a ToolLoop policy. Tools receive a string map
 // so a policy can emit simple structured arguments.
 type Tool[T any] struct {
 	Name        string
@@ -190,8 +190,8 @@ type Tool[T any] struct {
 	Run         func(ctx context.Context, state *T, args map[string]string) (string, error)
 }
 
-// AgentTurn is one entry in the transcript shown back to an Agent policy.
-type AgentTurn struct {
+// ToolLoopTurn is one entry in the transcript shown back to a ToolLoop policy.
+type ToolLoopTurn struct {
 	Step        int
 	Thought     string
 	Tool        string
@@ -200,13 +200,13 @@ type AgentTurn struct {
 	Error       string
 }
 
-// AgentDecision is the response from an Agent policy for one iteration.
+// ToolLoopDecision is the response from a ToolLoop policy for one iteration.
 //
 // Exactly one mode should be used: Done ends the loop successfully, Fail ends
 // it with an error, and otherwise Tool names the tool to call. A decision with
 // neither a tool nor a terminal state is reported back to the policy as a
 // malformed turn so it can correct itself.
-type AgentDecision struct {
+type ToolLoopDecision struct {
 	Thought string
 	Tool    string
 	Args    map[string]string
@@ -215,27 +215,27 @@ type AgentDecision struct {
 	Message string
 }
 
-// AgentPolicy selects the next tool call, or declares the loop finished.
-type AgentPolicy[T any] interface {
-	Next(ctx context.Context, state *T, history []AgentTurn) (AgentDecision, error)
+// ToolLoopPolicy selects the next tool call, or declares the loop finished.
+type ToolLoopPolicy[T any] interface {
+	Next(ctx context.Context, state *T, history []ToolLoopTurn) (ToolLoopDecision, error)
 }
 
-// AgentFunc adapts a function to AgentPolicy.
-type AgentFunc[T any] func(context.Context, *T, []AgentTurn) (AgentDecision, error)
+// ToolLoopFunc adapts a function to ToolLoopPolicy.
+type ToolLoopFunc[T any] func(context.Context, *T, []ToolLoopTurn) (ToolLoopDecision, error)
 
-// Next implements AgentPolicy.
-func (f AgentFunc[T]) Next(ctx context.Context, state *T, history []AgentTurn) (AgentDecision, error) {
+// Next implements ToolLoopPolicy.
+func (f ToolLoopFunc[T]) Next(ctx context.Context, state *T, history []ToolLoopTurn) (ToolLoopDecision, error) {
 	return f(ctx, state, history)
 }
 
-// AgentSpec configures an Agent node.
-type AgentSpec[T any] struct {
+// ToolLoopSpec configures a ToolLoop node.
+type ToolLoopSpec[T any] struct {
 	// Goal is descriptive only and is useful in traces and prompts.
 	Goal   string
-	Policy AgentPolicy[T]
+	Policy ToolLoopPolicy[T]
 	Tools  []Tool[T]
 	// MaxIterations bounds policy/tool turns. Zero means
-	// DefaultMaxAgentIterations.
+	// DefaultMaxToolLoopIterations.
 	MaxIterations int
 }
 
@@ -258,9 +258,9 @@ type Node[T any] struct {
 	Decision *DecisionSpec[T]
 	Branches []Branch[T]
 	Delay    time.Duration
-	Agent    *AgentSpec[T]
+	ToolLoop *ToolLoopSpec[T]
 
-	// Next is the destination for Task, Parallel, Wait and Agent nodes.
+	// Next is the destination for Task, Parallel, Wait and ToolLoop nodes.
 	NextNode NodeName
 	// Routes maps route keys to destinations for Choice and Decision nodes.
 	Routes map[string]NodeName
@@ -395,9 +395,9 @@ func (w *Workflow[T]) ParallelIsolated(name NodeName, copy func(*T) *T, merge fu
 	return w.add(n)
 }
 
-// Agent adds an Agent node.
-func (w *Workflow[T]) Agent(name NodeName, spec AgentSpec[T]) *Node[T] {
-	return w.add(&Node[T]{Name: name, Kind: KindAgent, Agent: &spec})
+// ToolLoop adds a ToolLoop node.
+func (w *Workflow[T]) ToolLoop(name NodeName, spec ToolLoopSpec[T]) *Node[T] {
+	return w.add(&Node[T]{Name: name, Kind: KindToolLoop, ToolLoop: &spec})
 }
 
 // SubWorkflow adds a nested workflow as a single node. The sub-workflow runs
@@ -418,7 +418,7 @@ func (w *Workflow[T]) Fail(name NodeName, message string) *Node[T] {
 	return w.add(&Node[T]{Name: name, Kind: KindFail, FailMessage: message})
 }
 
-// Next sets the destination for Task, Parallel, Wait and Agent nodes.
+// Next sets the destination for Task, Parallel, Wait and ToolLoop nodes.
 func (n *Node[T]) Next(target NodeName) *Node[T] {
 	n.NextNode = target
 	return n
@@ -472,7 +472,7 @@ func (n *Node[T]) Catch(target NodeName, match func(error) bool) *Node[T] {
 }
 
 // Validate checks the graph before it runs. It verifies that functions, routes
-// and agent tools are present and that every destination exists.
+// and ToolLoop tools are present and that every destination exists.
 func (w *Workflow[T]) Validate() error {
 	return w.validate(make(map[*Workflow[T]]bool))
 }
@@ -680,26 +680,26 @@ func (n *Node[T]) validate(visiting map[*Workflow[T]]bool) error {
 		if n.Delay < 0 {
 			return fmt.Errorf("node %q: wait duration must not be negative", n.Name)
 		}
-	case KindAgent:
-		if n.Agent == nil {
-			return fmt.Errorf("node %q: agent spec is nil", n.Name)
+	case KindToolLoop:
+		if n.ToolLoop == nil {
+			return fmt.Errorf("node %q: tool loop spec is nil", n.Name)
 		}
-		if n.Agent.Policy == nil {
-			return fmt.Errorf("node %q: agent policy is nil", n.Name)
+		if n.ToolLoop.Policy == nil {
+			return fmt.Errorf("node %q: tool loop policy is nil", n.Name)
 		}
-		if n.Agent.MaxIterations < 0 {
-			return fmt.Errorf("node %q: agent max iterations must not be negative", n.Name)
+		if n.ToolLoop.MaxIterations < 0 {
+			return fmt.Errorf("node %q: tool loop max iterations must not be negative", n.Name)
 		}
-		seen := make(map[string]bool, len(n.Agent.Tools))
-		for _, t := range n.Agent.Tools {
+		seen := make(map[string]bool, len(n.ToolLoop.Tools))
+		for _, t := range n.ToolLoop.Tools {
 			if t.Name == "" {
-				return fmt.Errorf("node %q: agent tool has no name", n.Name)
+				return fmt.Errorf("node %q: tool loop tool has no name", n.Name)
 			}
 			if t.Run == nil {
-				return fmt.Errorf("node %q: agent tool %q has no function", n.Name, t.Name)
+				return fmt.Errorf("node %q: tool loop tool %q has no function", n.Name, t.Name)
 			}
 			if seen[t.Name] {
-				return fmt.Errorf("node %q: duplicate agent tool %q", n.Name, t.Name)
+				return fmt.Errorf("node %q: duplicate tool loop tool %q", n.Name, t.Name)
 			}
 			seen[t.Name] = true
 		}

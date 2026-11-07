@@ -153,7 +153,7 @@ This example combines:
 - Succeed/Fail: terminal nodes
 
 The graph is static and can be exported as Mermaid. Every LLM decision is
-validated before execution. Loops and agent iterations are bounded.
+validated before execution. Loops and tool-loop iterations are bounded.
 Context cancellation is respected throughout.
 
 You can now extend this pattern to your own workflows by adding more node

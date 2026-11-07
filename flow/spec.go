@@ -60,7 +60,7 @@ type NodeSpec struct {
 	// Wait configuration.
 	Delay string `json:"delay,omitempty"`
 
-	// Agent configuration.
+	// ToolLoop configuration.
 	Goal          string     `json:"goal,omitempty"`
 	Policy        *CodeRef   `json:"policy,omitempty"`
 	Tools         []ToolSpec `json:"tools,omitempty"`
@@ -95,7 +95,7 @@ type BranchSpec struct {
 	Run  *CodeRef `json:"run,omitempty"`
 }
 
-// ToolSpec is one tool exposed to an Agent policy.
+// ToolSpec is one tool exposed to a ToolLoop policy.
 type ToolSpec struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
@@ -226,12 +226,12 @@ func buildNodeSpec[T any](node *Node[T], visiting map[*Workflow[T]]bool) (NodeSp
 	case KindWait:
 		spec.Delay = node.Delay.String()
 
-	case KindAgent:
-		if node.Agent != nil {
-			spec.Goal = node.Agent.Goal
-			spec.Policy = codeRefForValue(node.Agent.Policy)
-			spec.MaxIterations = node.Agent.MaxIterations
-			for _, tool := range node.Agent.Tools {
+	case KindToolLoop:
+		if node.ToolLoop != nil {
+			spec.Goal = node.ToolLoop.Goal
+			spec.Policy = codeRefForValue(node.ToolLoop.Policy)
+			spec.MaxIterations = node.ToolLoop.MaxIterations
+			for _, tool := range node.ToolLoop.Tools {
 				spec.Tools = append(spec.Tools, ToolSpec{
 					Name:        tool.Name,
 					Description: tool.Description,

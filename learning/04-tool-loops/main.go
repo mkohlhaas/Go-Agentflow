@@ -7,11 +7,11 @@ import (
 	"agentflow/flow"
 )
 
-// State is shared by every node and by every tool in the Agent.
+// State is shared by every node and by every tool in the ToolLoop.
 type State struct {
-	Value    int
-	Log      []string
-	TestsOK  bool
+	Value   int
+	Log     []string
+	TestsOK bool
 }
 
 // addTool is a deterministic tool: it increments Value and reports back.
@@ -38,60 +38,60 @@ var verifyTool = flow.Tool[State]{
 	},
 }
 
-// repairPolicy is a mock LLM that drives the Agent loop. It receives the
+// repairPolicy is a mock LLM that drives the ToolLoop. It receives the
 // full history of previous turns (thoughts, tools, observations, errors)
 // and decides what to do next.
 type repairPolicy struct{}
 
-func (repairPolicy) Next(_ context.Context, s *State, history []flow.AgentTurn) (flow.AgentDecision, error) {
+func (repairPolicy) Next(_ context.Context, s *State, history []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
 	switch len(history) {
 	case 0:
 		// First turn: call "add"
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "I need to raise the value. Call add.",
 			Tool:    "add",
 		}, nil
 	case 1:
 		// Second turn: call "add" again
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "Still not high enough. Call add again.",
 			Tool:    "add",
 		}, nil
 	case 2:
 		// Third turn: call "add" a third time
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "One more add should do it.",
 			Tool:    "add",
 		}, nil
 	case 3:
 		// Fourth turn: verify the result
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "Now let me verify with the test tool.",
 			Tool:    "verify",
 		}, nil
 	default:
 		// If tests pass, we're done. Otherwise fail.
 		if s.TestsOK {
-			return flow.AgentDecision{Done: true, Message: "goal reached"}, nil
+			return flow.ToolLoopDecision{Done: true, Message: "goal reached"}, nil
 		}
-		return flow.AgentDecision{Fail: true, Message: "tests still failing"}, nil
+		return flow.ToolLoopDecision{Fail: true, Message: "tests still failing"}, nil
 	}
 }
 
 func main() {
-	wf := flow.New[State]("agent-demo")
+	wf := flow.New[State]("tool-loop-demo")
 
-	wf.Agent("repair", flow.AgentSpec[State]{
+	wf.ToolLoop("repair", flow.ToolLoopSpec[State]{
 		// Goal is descriptive only — it appears in traces and can be used
 		// in prompts, but the engine does not interpret it.
-		Goal: "Raise Value to at least 3, then verify tests pass.",
+		Goal:   "Raise Value to at least 3, then verify tests pass.",
 		Policy: repairPolicy{},
 		Tools: []flow.Tool[State]{
 			addTool,
 			verifyTool,
 		},
 		// MaxIterations bounds the policy/tool loop. Zero means
-		// DefaultMaxAgentIterations (8). Here we set 10 explicitly.
+		// DefaultMaxToolLoopIterations (8). Here we set 10 explicitly.
 		MaxIterations: 10,
 	}).Next("done")
 
@@ -109,17 +109,17 @@ func main() {
 	fmt.Printf("Tests OK:     %v\n", state.TestsOK)
 	fmt.Printf("Log:          %v\n", state.Log)
 
-	// Show agent-specific events from the trace.
+	// Show tool-loop events from the trace.
 	for _, ev := range result.Trace {
 		switch ev.Kind {
-		case flow.EventAgentThought:
+		case flow.EventToolLoopThought:
 			fmt.Printf("  [thought] %s\n", ev.Message)
 		case flow.EventToolStarted:
 			fmt.Printf("  [tool] %s started\n", ev.Tool)
 		case flow.EventToolFinished:
 			fmt.Printf("  [tool] %s finished: %s\n", ev.Tool, ev.Message)
-		case flow.EventAgentFinished:
-			fmt.Printf("  [agent] finished: %s\n", ev.Message)
+		case flow.EventToolLoopFinished:
+			fmt.Printf("  [tool-loop] finished: %s\n", ev.Message)
 		}
 	}
 }
@@ -127,11 +127,11 @@ func main() {
 /*
 Key takeaways:
 
-- Agent is an iterative tool loop. The policy is called repeatedly until it
-  returns Done: true, Fail: true, or MaxIterations is reached.
-- AgentPolicy.Next receives ctx, state, and the full []AgentTurn history.
+- A ToolLoop node repeatedly calls a policy until it returns Done: true,
+  Fail: true, or MaxIterations is reached.
+- ToolLoopPolicy.Next receives ctx, state, and the full []ToolLoopTurn history.
   This is the transcript the "LLM" uses to decide its next action.
-- AgentDecision modes:
+- ToolLoopDecision modes:
   * Done: true  -> ends the loop successfully
   * Fail: true  -> ends the loop with an error
   * neither     -> must name a declared Tool; Args are passed to the tool
@@ -140,5 +140,5 @@ Key takeaways:
   observation in the next history turn. The policy can self-correct.
 - Tool errors are also observations — they don't crash the run. The policy
   decides whether to retry or fail based on history.
-- MaxIterations protects against runaway agent loops.
+- MaxIterations protects against runaway tool loops.
 */

@@ -42,10 +42,10 @@ func (specTestPolicy) Choose(context.Context, *specTestState, []flow.RouteOption
 	return "parallel", nil
 }
 
-type specTestAgentPolicy struct{}
+type specTestToolLoopPolicy struct{}
 
-func (specTestAgentPolicy) Next(context.Context, *specTestState, []flow.AgentTurn) (flow.AgentDecision, error) {
-	return flow.AgentDecision{Done: true}, nil
+func (specTestToolLoopPolicy) Next(context.Context, *specTestState, []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
+	return flow.ToolLoopDecision{Done: true}, nil
 }
 
 func buildSpecTestWorkflow() *flow.Workflow[specTestState] {
@@ -82,11 +82,11 @@ func buildSpecTestWorkflow() *flow.Workflow[specTestState] {
 		Run:  specTestBranch,
 	}).Next("wait")
 
-	wf.Wait("wait", time.Second).Next("agent")
+	wf.Wait("wait", time.Second).Next("tool-loop")
 
-	wf.Agent("agent", flow.AgentSpec[specTestState]{
+	wf.ToolLoop("tool-loop", flow.ToolLoopSpec[specTestState]{
 		Goal:   "do the thing",
-		Policy: specTestAgentPolicy{},
+		Policy: specTestToolLoopPolicy{},
 		Tools: []flow.Tool[specTestState]{
 			{Name: "tool", Description: "desc", Run: specTestTool},
 		},
@@ -216,17 +216,17 @@ func TestSpecCoversAllNodeKinds(t *testing.T) {
 		t.Fatalf("wait = %+v, want kind=wait delay=1s", wait)
 	}
 
-	agent := nodeSpecByName(t, spec, "agent")
-	if agent.Kind != flow.KindAgent || agent.Goal != "do the thing" || agent.MaxIterations != 3 {
-		t.Fatalf("agent = %+v, want the declared goal and iteration limit", agent)
+	toolLoop := nodeSpecByName(t, spec, "tool-loop")
+	if toolLoop.Kind != flow.KindToolLoop || toolLoop.Goal != "do the thing" || toolLoop.MaxIterations != 3 {
+		t.Fatalf("toolLoop = %+v, want the declared goal and iteration limit", toolLoop)
 	}
-	if agent.Policy == nil || agent.Policy.Kind != flow.CodeRefKindType ||
-		!strings.HasSuffix(agent.Policy.Name, "specTestAgentPolicy") {
-		t.Fatalf("agent.Policy = %+v, want a type ref for specTestAgentPolicy", agent.Policy)
+	if toolLoop.Policy == nil || toolLoop.Policy.Kind != flow.CodeRefKindType ||
+		!strings.HasSuffix(toolLoop.Policy.Name, "specTestToolLoopPolicy") {
+		t.Fatalf("toolLoop.Policy = %+v, want a type ref for specTestToolLoopPolicy", toolLoop.Policy)
 	}
-	if len(agent.Tools) != 1 || agent.Tools[0].Name != "tool" ||
-		agent.Tools[0].Description != "desc" || agent.Tools[0].Run == nil {
-		t.Fatalf("agent.Tools = %+v, want tool with a code ref", agent.Tools)
+	if len(toolLoop.Tools) != 1 || toolLoop.Tools[0].Name != "tool" ||
+		toolLoop.Tools[0].Description != "desc" || toolLoop.Tools[0].Run == nil {
+		t.Fatalf("toolLoop.Tools = %+v, want tool with a code ref", toolLoop.Tools)
 	}
 
 	sub := nodeSpecByName(t, spec, "sub")

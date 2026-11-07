@@ -3,7 +3,7 @@ flowchart TD
     start(["start"])
     n0["prepare<br/><small>task</small>"]
     n1{{"triage<br/><small>decision / 2 options</small>"}}
-    n2["repair<br/><small>agent loop / 3 tools</small>"]
+    n2["repair<br/><small>tool loop / 3 tools</small>"]
     n3{"gate<br/><small>choice</small>"}
     n4["report<br/><small>succeed</small>"]
     n5["escalate<br/><small>fail</small>"]
@@ -17,7 +17,7 @@ flowchart TD
 
     class n0 task;
     class n1 decision;
-    class n2 agent;
+    class n2 toolloop;
     class n3 choice;
     class n4 succeed;
     class n5 fail;
@@ -27,7 +27,8 @@ flowchart TD
     classDef decision fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
     classDef parallel fill:#f3e8ff,stroke:#9333ea,color:#4c1d95;
     classDef wait fill:#f1f5f9,stroke:#64748b,color:#1e293b;
-    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef toolloop fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef subworkflow fill:#f0fdf4,stroke:#15803d,color:#14532d;
     classDef succeed fill:#dcfce7,stroke:#16a34a,color:#14532d;
     classDef fail fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
     classDef branch fill:#faf5ff,stroke:#a855f7,color:#581c87;

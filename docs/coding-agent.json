@@ -37,7 +37,7 @@
     },
     {
       "name": "repair",
-      "kind": "agent",
+      "kind": "tool-loop",
       "next": "gate",
       "goal": "Read the failing implementation, patch it, and verify with go test.",
       "policy": {

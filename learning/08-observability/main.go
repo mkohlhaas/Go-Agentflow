@@ -93,7 +93,7 @@ Key takeaways:
   need locking.
 - Event kinds include node_started, node_finished, node_failed, retry,
   branch_started/finished/failed, route_selected, decision_rejected,
-  agent_thought, tool_started/finished/failed/rejected, agent_finished,
+  tool_loop_thought, tool_started/finished/failed/rejected, tool_loop_finished,
   workflow_finished/failed/canceled.
 - Mermaid() renders the static graph as a flowchart TD diagram. Node
   declaration order is preserved, so output is deterministic across calls.

@@ -383,38 +383,38 @@ func TestDecisionExhaustsAttempts(t *testing.T) {
 	}
 }
 
-type agentState struct {
+type toolLoopState struct {
 	Value   int
-	History []flow.AgentTurn
+	History []flow.ToolLoopTurn
 }
 
-func addTool() flow.Tool[agentState] {
-	return flow.Tool[agentState]{
+func addTool() flow.Tool[toolLoopState] {
+	return flow.Tool[toolLoopState]{
 		Name:        "add",
 		Description: "increment the value",
-		Run: func(_ context.Context, s *agentState, _ map[string]string) (string, error) {
+		Run: func(_ context.Context, s *toolLoopState, _ map[string]string) (string, error) {
 			s.Value++
 			return "incremented", nil
 		},
 	}
 }
 
-func TestAgentLoopCallsToolsUntilDone(t *testing.T) {
-	wf := flow.New[agentState]("agent")
-	wf.Agent("repair", flow.AgentSpec[agentState]{
+func TestToolLoopCallsToolsUntilDone(t *testing.T) {
+	wf := flow.New[toolLoopState]("tool-loop")
+	wf.ToolLoop("repair", flow.ToolLoopSpec[toolLoopState]{
 		Goal: "increment three times",
-		Policy: flow.AgentFunc[agentState](func(_ context.Context, _ *agentState, history []flow.AgentTurn) (flow.AgentDecision, error) {
+		Policy: flow.ToolLoopFunc[toolLoopState](func(_ context.Context, _ *toolLoopState, history []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
 			if len(history) < 3 {
-				return flow.AgentDecision{Thought: "add one", Tool: "add"}, nil
+				return flow.ToolLoopDecision{Thought: "add one", Tool: "add"}, nil
 			}
-			return flow.AgentDecision{Done: true, Message: "target reached"}, nil
+			return flow.ToolLoopDecision{Done: true, Message: "target reached"}, nil
 		}),
-		Tools:         []flow.Tool[agentState]{addTool()},
+		Tools:         []flow.Tool[toolLoopState]{addTool()},
 		MaxIterations: 10,
 	}).Next("done")
 	wf.Succeed("done")
 
-	var state agentState
+	var state toolLoopState
 	res := runOK(t, wf, &state)
 
 	if state.Value != 3 {
@@ -423,34 +423,34 @@ func TestAgentLoopCallsToolsUntilDone(t *testing.T) {
 	if got := countEvents(res.Trace, flow.EventToolFinished); got != 3 {
 		t.Fatalf("tool finished events = %d, want 3", got)
 	}
-	if got := countEvents(res.Trace, flow.EventAgentThought); got != 3 {
-		t.Fatalf("agent thought events = %d, want 3", got)
+	if got := countEvents(res.Trace, flow.EventToolLoopThought); got != 3 {
+		t.Fatalf("tool loop thought events = %d, want 3", got)
 	}
-	if got := countEvents(res.Trace, flow.EventAgentFinished); got != 1 {
-		t.Fatalf("agent finished events = %d, want 1", got)
+	if got := countEvents(res.Trace, flow.EventToolLoopFinished); got != 1 {
+		t.Fatalf("tool loop finished events = %d, want 1", got)
 	}
 }
 
-func TestAgentFeedsUnknownToolBackToPolicy(t *testing.T) {
-	wf := flow.New[agentState]("agent-unknown")
-	wf.Agent("repair", flow.AgentSpec[agentState]{
-		Policy: flow.AgentFunc[agentState](func(_ context.Context, s *agentState, history []flow.AgentTurn) (flow.AgentDecision, error) {
+func TestToolLoopFeedsUnknownToolBackToPolicy(t *testing.T) {
+	wf := flow.New[toolLoopState]("tool-loop-unknown")
+	wf.ToolLoop("repair", flow.ToolLoopSpec[toolLoopState]{
+		Policy: flow.ToolLoopFunc[toolLoopState](func(_ context.Context, s *toolLoopState, history []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
 			switch len(history) {
 			case 0:
-				return flow.AgentDecision{Tool: "missing"}, nil
+				return flow.ToolLoopDecision{Tool: "missing"}, nil
 			case 1:
-				return flow.AgentDecision{Tool: "add"}, nil
+				return flow.ToolLoopDecision{Tool: "add"}, nil
 			default:
-				s.History = append([]flow.AgentTurn(nil), history...)
-				return flow.AgentDecision{Done: true}, nil
+				s.History = append([]flow.ToolLoopTurn(nil), history...)
+				return flow.ToolLoopDecision{Done: true}, nil
 			}
 		}),
-		Tools:         []flow.Tool[agentState]{addTool()},
+		Tools:         []flow.Tool[toolLoopState]{addTool()},
 		MaxIterations: 5,
 	}).Next("done")
 	wf.Succeed("done")
 
-	var state agentState
+	var state toolLoopState
 	res := runOK(t, wf, &state)
 
 	if len(state.History) != 2 {
@@ -464,28 +464,28 @@ func TestAgentFeedsUnknownToolBackToPolicy(t *testing.T) {
 	}
 }
 
-func TestAgentToolErrorIsAnObservation(t *testing.T) {
-	failing := flow.Tool[agentState]{
+func TestToolLoopToolErrorIsAnObservation(t *testing.T) {
+	failing := flow.Tool[toolLoopState]{
 		Name: "fail",
-		Run: func(context.Context, *agentState, map[string]string) (string, error) {
+		Run: func(context.Context, *toolLoopState, map[string]string) (string, error) {
 			return "partial", errors.New("tool exploded")
 		},
 	}
-	wf := flow.New[agentState]("agent-tool-error")
-	wf.Agent("repair", flow.AgentSpec[agentState]{
-		Policy: flow.AgentFunc[agentState](func(_ context.Context, s *agentState, history []flow.AgentTurn) (flow.AgentDecision, error) {
+	wf := flow.New[toolLoopState]("tool-loop-error")
+	wf.ToolLoop("repair", flow.ToolLoopSpec[toolLoopState]{
+		Policy: flow.ToolLoopFunc[toolLoopState](func(_ context.Context, s *toolLoopState, history []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
 			if len(history) == 0 {
-				return flow.AgentDecision{Tool: "fail"}, nil
+				return flow.ToolLoopDecision{Tool: "fail"}, nil
 			}
-			s.History = append([]flow.AgentTurn(nil), history...)
-			return flow.AgentDecision{Done: true}, nil
+			s.History = append([]flow.ToolLoopTurn(nil), history...)
+			return flow.ToolLoopDecision{Done: true}, nil
 		}),
-		Tools:         []flow.Tool[agentState]{failing},
+		Tools:         []flow.Tool[toolLoopState]{failing},
 		MaxIterations: 5,
 	}).Next("done")
 	wf.Succeed("done")
 
-	var state agentState
+	var state toolLoopState
 	res := runOK(t, wf, &state)
 
 	if len(state.History) != 1 || !strings.Contains(state.History[0].Error, "tool exploded") {
@@ -496,21 +496,21 @@ func TestAgentToolErrorIsAnObservation(t *testing.T) {
 	}
 }
 
-func TestAgentIterationLimit(t *testing.T) {
-	wf := flow.New[agentState]("agent-limit")
-	wf.Agent("repair", flow.AgentSpec[agentState]{
-		Policy: flow.AgentFunc[agentState](func(context.Context, *agentState, []flow.AgentTurn) (flow.AgentDecision, error) {
-			return flow.AgentDecision{Tool: "add"}, nil
+func TestToolLoopIterationLimit(t *testing.T) {
+	wf := flow.New[toolLoopState]("tool-loop-limit")
+	wf.ToolLoop("repair", flow.ToolLoopSpec[toolLoopState]{
+		Policy: flow.ToolLoopFunc[toolLoopState](func(context.Context, *toolLoopState, []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
+			return flow.ToolLoopDecision{Tool: "add"}, nil
 		}),
-		Tools:         []flow.Tool[agentState]{addTool()},
+		Tools:         []flow.Tool[toolLoopState]{addTool()},
 		MaxIterations: 2,
 	}).Next("done")
 	wf.Succeed("done")
 
-	var state agentState
+	var state toolLoopState
 	res, err := wf.Run(context.Background(), &state)
-	if !errors.Is(err, flow.ErrAgentIterations) {
-		t.Fatalf("error = %v, want ErrAgentIterations", err)
+	if !errors.Is(err, flow.ErrToolLoopIterations) {
+		t.Fatalf("error = %v, want ErrToolLoopIterations", err)
 	}
 	if res.Status != flow.StatusFailed {
 		t.Fatalf("status = %q, want failed", res.Status)
@@ -520,20 +520,20 @@ func TestAgentIterationLimit(t *testing.T) {
 	}
 }
 
-func TestAgentCanReportFailure(t *testing.T) {
-	wf := flow.New[agentState]("agent-fail")
-	wf.Agent("repair", flow.AgentSpec[agentState]{
-		Policy: flow.AgentFunc[agentState](func(context.Context, *agentState, []flow.AgentTurn) (flow.AgentDecision, error) {
-			return flow.AgentDecision{Fail: true, Message: "cannot fix this"}, nil
+func TestToolLoopCanReportFailure(t *testing.T) {
+	wf := flow.New[toolLoopState]("tool-loop-fail")
+	wf.ToolLoop("repair", flow.ToolLoopSpec[toolLoopState]{
+		Policy: flow.ToolLoopFunc[toolLoopState](func(context.Context, *toolLoopState, []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
+			return flow.ToolLoopDecision{Fail: true, Message: "cannot fix this"}, nil
 		}),
 		MaxIterations: 2,
 	}).Next("done")
 	wf.Succeed("done")
 
-	var state agentState
+	var state toolLoopState
 	res, err := wf.Run(context.Background(), &state)
 	if err == nil || !strings.Contains(err.Error(), "cannot fix this") {
-		t.Fatalf("error = %v, want agent message", err)
+		t.Fatalf("error = %v, want tool loop message", err)
 	}
 	if res.Status != flow.StatusFailed {
 		t.Fatalf("status = %q, want failed", res.Status)
@@ -908,9 +908,9 @@ func TestMermaidRendering(t *testing.T) {
 		flow.Branch[seqState]{Name: "test", Run: func(context.Context, *seqState) error { return nil }},
 	).Next("slow")
 	wf.Wait("slow", time.Second).Next("repair")
-	wf.Agent("repair", flow.AgentSpec[seqState]{
-		Policy: flow.AgentFunc[seqState](func(context.Context, *seqState, []flow.AgentTurn) (flow.AgentDecision, error) {
-			return flow.AgentDecision{Done: true}, nil
+	wf.ToolLoop("repair", flow.ToolLoopSpec[seqState]{
+		Policy: flow.ToolLoopFunc[seqState](func(context.Context, *seqState, []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
+			return flow.ToolLoopDecision{Done: true}, nil
 		}),
 		Tools: []flow.Tool[seqState]{
 			{Name: "run_tests", Run: func(context.Context, *seqState, map[string]string) (string, error) {
@@ -935,7 +935,7 @@ func TestMermaidRendering(t *testing.T) {
 		`n1{{"triage<br/><small>decision / 2 options</small>"}}`,
 		`n2{"gate<br/><small>choice</small>"}`,
 		`n4["slow<br/><small>wait 1s</small>"]`,
-		`n5["repair<br/><small>agent loop / 1 tools</small>"]`,
+		`n5["repair<br/><small>tool loop / 1 tools</small>"]`,
 		`n1 -->|"fix"| n2`,
 		`n1 -->|"skip"| n7`,
 		`n2 -->|"ok"| n3`,

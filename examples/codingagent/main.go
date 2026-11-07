@@ -92,7 +92,7 @@ func buildWorkflow() *flow.Workflow[State] {
 		Choose:      triagePolicy{},
 		MaxAttempts: 2,
 	})
-	wf.Agent("repair", flow.AgentSpec[State]{
+	wf.ToolLoop("repair", flow.ToolLoopSpec[State]{
 		Goal:          "Read the failing implementation, patch it, and verify with go test.",
 		Policy:        repairPolicy{},
 		Tools:         codingTools(),
@@ -123,28 +123,28 @@ func (triagePolicy) Choose(_ context.Context, s *State, options []flow.RouteOpti
 	return "stop", nil
 }
 
-// repairPolicy is the mock LLM for the Agent node. It performs a fixed sequence
+// repairPolicy is the mock LLM for the ToolLoop node. It performs a fixed sequence
 // of tool calls but reacts to tool errors and to the test result, which is the
 // same feedback loop a real LLM would use.
 type repairPolicy struct{}
 
-func (repairPolicy) Next(_ context.Context, s *State, history []flow.AgentTurn) (flow.AgentDecision, error) {
+func (repairPolicy) Next(_ context.Context, s *State, history []flow.ToolLoopTurn) (flow.ToolLoopDecision, error) {
 	if len(history) > 0 {
 		last := history[len(history)-1]
 		if last.Error != "" && last.Tool == "apply_patch" {
-			return flow.AgentDecision{Fail: true, Message: "patch failed: " + last.Error}, nil
+			return flow.ToolLoopDecision{Fail: true, Message: "patch failed: " + last.Error}, nil
 		}
 	}
 
 	switch len(history) {
 	case 0:
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "Read the implementation before changing it.",
 			Tool:    "read_file",
 			Args:    map[string]string{"path": "math.go"},
 		}, nil
 	case 1:
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "Add subtracts instead of adds. Replace the body with a + b.",
 			Tool:    "apply_patch",
 			Args: map[string]string{
@@ -154,18 +154,18 @@ func (repairPolicy) Next(_ context.Context, s *State, history []flow.AgentTurn) 
 			},
 		}, nil
 	case 2:
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "Patch applied. Let the compiler and tests decide whether it is correct.",
 			Tool:    "run_tests",
 		}, nil
 	default:
 		if !s.TestsPassed {
-			return flow.AgentDecision{
+			return flow.ToolLoopDecision{
 				Fail:    true,
 				Message: "tests are still failing: " + s.TestOutput,
 			}, nil
 		}
-		return flow.AgentDecision{Done: true, Message: "go test passes"}, nil
+		return flow.ToolLoopDecision{Done: true, Message: "go test passes"}, nil
 	}
 }
 

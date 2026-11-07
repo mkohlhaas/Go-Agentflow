@@ -21,7 +21,7 @@ From this directory:
 go run ./01-basics
 go run ./02-choice-loops
 go run ./03-decisions
-go run ./04-agents
+go run ./04-tool-loops
 go run ./05-parallel
 go run ./06-wait-cancellation
 go run ./07-errors-retries
@@ -41,7 +41,7 @@ go vet ./...
 | `01-basics` | `New`, `Task`, `Succeed`, `Next`, `Run`, typed state |
 | `02-choice-loops` | `Choice`, `When`, `Otherwise`, bounded loops via graph cycles |
 | `03-decisions` | `Decision`, `DecisionPolicy`, whitelisted route options, `MaxAttempts` |
-| `04-agents` | `Agent`, `AgentPolicy`, tools, `AgentTurn` history, `Done` / `Fail` |
+| `04-tool-loops` | `ToolLoop`, `ToolLoopPolicy`, tools, `ToolLoopTurn` history, `Done` / `Fail` |
 | `05-parallel` | `Parallel` (shared state + mutexes) vs `ParallelIsolated` (lock-free copies) |
 | `06-wait-cancellation` | `Wait`, context cancellation, `StatusCanceled` |
 | `07-errors-retries` | `WithRetry`, `Catch`, `MatchIs`, `MatchAs`, error routes |

@@ -8,7 +8,8 @@ declared action to take next.
 - Workflows are written as ordinary Go code with a typed state value.
 - The graph is static and can be exported as a Mermaid diagram.
 - `Decision` nodes expose a whitelist of routes to an LLM policy.
-- `Agent` nodes run an iterative tool-selection loop with a whitelist of tools.
+- `ToolLoop` nodes run an iterative tool-selection loop with a whitelist of
+  tools.
 - Deterministic tools such as `go build`, `go test`, `go vet` and `gofmt` act as
   verification gates.
 - No database, no durable execution, no replay. A run lives in memory and is
@@ -107,8 +108,8 @@ explain. `agentflow` splits responsibilities:
 
 1. **Go code owns the graph.** Nodes, routes, retries, gates and limits are
    declared by the programmer.
-2. **The LLM owns a choice.** A `Decision` policy picks one declared route. An
-   `Agent` policy picks one declared tool or declares the loop finished.
+2. **The LLM owns a choice.** A `Decision` policy picks one declared route. A
+   `ToolLoop` policy picks one declared tool or declares the loop finished.
 3. **Deterministic tools own verification.** A coding agent can propose a patch,
    but `go test` decides whether the patch is acceptable.
 
@@ -123,7 +124,7 @@ and inspecting it.
 **Definition — [`flow/flow.go`](flow/flow.go).** `flow.New[T]` creates a
 `Workflow[T]`; the first node added becomes the start unless `StartAt`
 overrides it. The `Task`, `Choice`, `Decision`, `Parallel`,
-`ParallelIsolated`, `Wait`, `Agent`, `SubWorkflow`, `Succeed`, and `Fail`
+`ParallelIsolated`, `Wait`, `ToolLoop`, `SubWorkflow`, `Succeed`, and `Fail`
 builders add nodes, while `Next`, `When`/`Otherwise`, `WithRetry`, and
 `Catch` declare edges. Definition-time
 mistakes — duplicate node names, duplicate routes, empty keys or targets —
@@ -140,7 +141,7 @@ kind has a small executor:
 - `Decision` asks a `DecisionPolicy` to pick one declared option; unknown keys
   are rejected and retried up to `MaxAttempts`.
 - `Parallel` runs branches concurrently, waits for all of them, then joins.
-- `Agent` runs a bounded policy/tool loop, showing the policy the accumulated
+- `ToolLoop` runs a bounded policy/tool loop, showing the policy the accumulated
   transcript of previous turns.
 - `SubWorkflow` runs a nested graph as a single opaque step, sharing state.
 - `Wait` sleeps interruptibly.
@@ -181,7 +182,7 @@ example at a time.
 | `Parallel` | Runs branches concurrently and waits for all of them. Branches share state. | `Next` after the join |
 | `ParallelIsolated` | Runs branches concurrently on isolated state copies, then merges. Mutex-free. | `Next` after the join |
 | `Wait` | Sleeps for a fixed duration, interruptible by context cancellation. | `Next` |
-| `Agent` | Runs a policy/tool loop until `Done`, `Fail`, or the iteration limit. | `Next` |
+| `ToolLoop` | Runs a policy/tool loop until `Done`, `Fail`, or the iteration limit. | `Next` |
 | `SubWorkflow` | Runs a nested workflow as a single node, sharing state. Can nest to any depth. | `Next` after the sub-workflow completes |
 | `Succeed` | Ends the workflow successfully. | terminal |
 | `Fail` | Ends the workflow with an error message. | terminal |
@@ -203,7 +204,7 @@ wf.Parallel(name, branches...)    // Branch
 wf.ParallelIsolated(name, copy, merge, branches...) // Branch with per-branch state copies
 wf.SubWorkflow(name, sub)                           // Nested workflow as a single node
 wf.Wait(name, duration)
-wf.Agent(name, spec)              // AgentSpec
+wf.ToolLoop(name, spec)           // ToolLoopSpec
 wf.Succeed(name)
 wf.Fail(name, message)
 
@@ -253,23 +254,24 @@ If the policy returns a key that is not declared, the engine records a
 `decision_rejected` event and asks again up to `MaxAttempts` times. If it still
 cannot produce a valid option, the node fails.
 
-### Agent nodes
+### ToolLoop nodes
 
-An `Agent` is an iterative tool loop for work where the number of steps is not
-known in advance. The policy is shown the full transcript of previous turns:
+An agent is the whole workflow; a `ToolLoop` node is the bounded policy/tool
+loop it uses to act. It is useful when the number of steps is not known in
+advance. The policy is shown the full transcript of previous turns:
 
 ```go
-wf.Agent("repair", flow.AgentSpec[State]{
+wf.ToolLoop("repair", flow.ToolLoopSpec[State]{
 	Goal: "Make the tests pass.",
-	Policy: flow.AgentFunc[State](func(
+	Policy: flow.ToolLoopFunc[State](func(
 		ctx context.Context,
 		s *State,
-		history []flow.AgentTurn,
-	) (flow.AgentDecision, error) {
+		history []flow.ToolLoopTurn,
+	) (flow.ToolLoopDecision, error) {
 		if s.TestsPassed {
-			return flow.AgentDecision{Done: true}, nil
+			return flow.ToolLoopDecision{Done: true}, nil
 		}
-		return flow.AgentDecision{
+		return flow.ToolLoopDecision{
 			Thought: "Try the existing proposed fix.",
 			Tool:    "apply_patch",
 			Args:    map[string]string{"path": "math.go"},
@@ -292,13 +294,15 @@ wf.Agent("repair", flow.AgentSpec[State]{
 A policy response has three modes:
 
 - `Done: true` ends the loop successfully.
-- `Fail: true` ends the agent with an error. The `Message` is used as the error.
+- `Fail: true` ends the tool loop with an error. The `Message` is used as the
+  error.
 - Otherwise `Tool` must name a declared tool. `Args` is passed to the tool.
 
 Unknown tools and malformed responses are appended to the transcript as errors
 instead of crashing the run, so a real LLM can correct itself. Tool errors are
 also observations; the policy decides whether to retry or fail. Every tool call
-is bounded by `MaxIterations`.
+is bounded by `MaxIterations`. The policy does not have to call an LLM; a
+deterministic function is a valid `ToolLoopPolicy`.
 
 ### Retries and error routes
 
@@ -382,7 +386,7 @@ result, err := wf.Run(ctx, &state,
 ```
 
 Events cover node transitions, retries, route selection, rejected decisions,
-agent thoughts, tool calls and workflow completion. They are stored on
+tool-loop thoughts, tool calls and workflow completion. They are stored on
 `result.Trace` and delivered to the observer in order. The observer is called
 from the goroutine driving the run, not from parallel branches.
 
@@ -390,8 +394,8 @@ from the goroutine driving the run, not from parallel branches.
 
 - A run starts at the first declared node unless `StartAt` overrides it.
 - Each node visit counts as one step. The default limit is
-  `flow.DefaultMaxSteps` (1000); loops are allowed but bounded.
-- `Decision` attempts and agent iterations have their own limits and do not
+  `flow.DefaultMaxSteps` (1000); graph cycles are allowed but bounded.
+- `Decision` attempts and tool-loop iterations have their own limits and do not
   consume the graph step budget.
 - `Choice` returns a route key. An empty key selects the `Otherwise` route when
   one was declared. Unknown keys fail the node.
@@ -424,7 +428,7 @@ flowchart TD
     start(["start"])
     n0["prepare<br/><small>task</small>"]
     n1{{"triage<br/><small>decision / 2 options</small>"}}
-    n2["repair<br/><small>agent loop / 3 tools</small>"]
+    n2["repair<br/><small>tool loop / 3 tools</small>"]
     n3{"gate<br/><small>choice</small>"}
     n4["report<br/><small>succeed</small>"]
     n5["escalate<br/><small>fail</small>"]
@@ -438,7 +442,7 @@ flowchart TD
 
     class n0 task;
     class n1 decision;
-    class n2 agent;
+    class n2 toolloop;
     class n3 choice;
     class n4 succeed;
     class n5 fail;
@@ -448,7 +452,8 @@ flowchart TD
     classDef decision fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
     classDef parallel fill:#f3e8ff,stroke:#9333ea,color:#4c1d95;
     classDef wait fill:#f1f5f9,stroke:#64748b,color:#1e293b;
-    classDef agent fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef toolloop fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef subworkflow fill:#f0fdf4,stroke:#15803d,color:#14532d;
     classDef succeed fill:#dcfce7,stroke:#16a34a,color:#14532d;
     classDef fail fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
     classDef branch fill:#faf5ff,stroke:#a855f7,color:#581c87;
@@ -471,9 +476,9 @@ go run ./examples/codingagent -spec
 ```
 
 The document describes *structure*, not behavior. It includes node kinds,
-routes, decision options and descriptions, retry policies, decision and agent
-limits, tool allowlists, error routes and inlined sub-workflows. It does not
-describe what the Go functions or policies do.
+routes, decision options and descriptions, retry policies, decision and
+tool-loop limits, tool allowlists, error routes and inlined sub-workflows. It
+does not describe what the Go functions or policies do.
 
 Function references are best-effort and only include stable names: top-level
 functions, methods (with the runtime `-fm` suffix removed) and concrete policy
@@ -517,7 +522,7 @@ checked-in example with `make spec`.
 - **Tools are whitelisted.** Unknown tool names are fed back as observations
   rather than executed.
 - **Loops are bounded.** `MaxSteps` protects graph cycles; `MaxIterations`
-  protects agent loops.
+  protects `ToolLoop` nodes.
 - **Cancellation is respected.** Pass a context and use `exec.CommandContext` for
   subprocesses so a canceled run stops.
 - **Parallel branches can run lock-free.** Use `ParallelIsolated` to give each
@@ -535,7 +540,7 @@ and verify results with code.
 
 [`examples/codingagent`](examples/codingagent) builds a temporary Go module with
 a buggy `Add` function and a failing test. A `Decision` node chooses whether to
-repair or abort. An `Agent` node then uses three tools:
+repair or abort. A `ToolLoop` node then uses three tools:
 
 - `read_file` to inspect `math.go`,
 - `apply_patch` to replace `return a - b` with `return a + b`,
@@ -561,8 +566,9 @@ go run ./examples/codingagent -spec        # print the JSON specification
   execution or replay. If the process dies, the run is lost.
 - **No expression language.** Branch conditions and state access are Go code.
   There is no JSONPath or ASL-style data path layer.
-- **No built-in LLM client.** Implement `DecisionPolicy` and `AgentPolicy` for
-  your provider. The library does not manage prompts, models or token budgets.
+- **No built-in LLM client.** Implement `DecisionPolicy` and `ToolLoopPolicy`
+  for your provider. The library does not manage prompts, models or token
+  budgets.
 - **No automatic state merging.** `Parallel` branches receive the same state
   pointer; use atomics, mutexes, or `ParallelIsolated` (per-branch copies with a
   merge step) if branches write concurrently.
@@ -582,7 +588,7 @@ go run ./examples/codingagent -spec        # print the JSON specification
 agentflow/
   flow/
     flow.go       types, builders and validation
-    run.go        execution engine, events and agent loop
+    run.go        execution engine, events and tool-loop executor
     mermaid.go    deterministic Mermaid rendering
     spec.go       deterministic JSON workflow description
     flow_test.go  engine and rendering tests
