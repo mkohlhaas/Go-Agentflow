@@ -19,7 +19,7 @@ func logHelper(s *State, msg string) {
 	s.Log = append(s.Log, msg)
 }
 
-func runOK(state *State, res *flow.Result[State], err error) {
+func runOK(_ *State, res *flow.Result[State], err error) {
 	if err != nil {
 		panic(fmt.Sprintf("Run returned error: %v", err))
 	}
@@ -105,8 +105,7 @@ func runErrorHandling() {
 		return
 	}
 
-	var swe *flow.SubWorkflowError
-	if errors.As(err, &swe) {
+	if swe, ok := errors.AsType[*flow.SubWorkflowError](err); ok {
 		fmt.Printf("Caught *flow.SubWorkflowError:\n")
 		fmt.Printf("  Err:   %v\n", swe.Err)
 		fmt.Printf("  Trace: %d events from inside sub-workflow\n", len(swe.Trace))
