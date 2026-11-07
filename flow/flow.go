@@ -474,9 +474,23 @@ func (n *Node[T]) Catch(target NodeName, match func(error) bool) *Node[T] {
 // Validate checks the graph before it runs. It verifies that functions, routes
 // and agent tools are present and that every destination exists.
 func (w *Workflow[T]) Validate() error {
+	return w.validate(make(map[*Workflow[T]]bool))
+}
+
+// validate implements Validate. The visiting set holds the workflows currently
+// on the validation stack, so a sub-workflow cycle is reported instead of
+// recursing until the stack overflows. It is a stack, not a set of all visited
+// workflows, so a sub-workflow may be reused in multiple places.
+func (w *Workflow[T]) validate(visiting map[*Workflow[T]]bool) error {
 	if w == nil {
 		return fmt.Errorf("flow: nil workflow")
 	}
+	if visiting[w] {
+		return fmt.Errorf("flow: workflow %q: sub-workflow cycle detected", w.Name)
+	}
+	visiting[w] = true
+	defer delete(visiting, w)
+
 	if len(w.nodes) == 0 {
 		return fmt.Errorf("flow: workflow %q has no nodes", w.Name)
 	}
@@ -487,7 +501,7 @@ func (w *Workflow[T]) Validate() error {
 		return fmt.Errorf("flow: workflow %q: start node %q does not exist", w.Name, w.start)
 	}
 	for _, name := range w.order {
-		if err := w.nodes[name].validate(); err != nil {
+		if err := w.nodes[name].validate(visiting); err != nil {
 			return fmt.Errorf("flow: workflow %q: %w", w.Name, err)
 		}
 	}
@@ -598,7 +612,7 @@ func (w *Workflow[T]) validateGraphStructure() error {
 	return nil
 }
 
-func (n *Node[T]) validate() error {
+func (n *Node[T]) validate(visiting map[*Workflow[T]]bool) error {
 	switch n.Kind {
 	case KindTask:
 		if n.Task == nil {
@@ -693,7 +707,7 @@ func (n *Node[T]) validate() error {
 		if n.SubWorkflow == nil {
 			return fmt.Errorf("node %q: sub-workflow is nil", n.Name)
 		}
-		if err := n.SubWorkflow.Validate(); err != nil {
+		if err := n.SubWorkflow.validate(visiting); err != nil {
 			return fmt.Errorf("node %q: sub-workflow validation: %w", n.Name, err)
 		}
 	case KindSucceed, KindFail:

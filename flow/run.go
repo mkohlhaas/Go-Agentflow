@@ -269,7 +269,7 @@ func (w *Workflow[T]) executeNode(
 		return node.NextNode, nil
 
 	case KindSubWorkflow:
-		return runSubWorkflow(ctx, node, state, step, emit)
+		return runSubWorkflow(ctx, node, state)
 
 	case KindSucceed, KindFail:
 		return "", nil
@@ -560,22 +560,20 @@ func runSubWorkflow[T any](
 	ctx context.Context,
 	node *Node[T],
 	state *T,
-	step int,
-	emit func(Event),
 ) (NodeName, error) {
 	sub := node.SubWorkflow
 	if sub == nil {
 		return "", fmt.Errorf("node %q: sub-workflow is nil", string(node.Name))
 	}
 
-	emit(Event{
-		Kind: EventNodeStarted,
-		Node: string(node.Name),
-		Step: step,
-	})
-
 	// Run the sub-workflow synchronously. It shares the parent's state and
 	// counts as a single opaque step in the parent graph.
+	//
+	// The parent Run loop owns node lifecycle events, so this function must
+	// not emit EventNodeStarted/EventNodeFinished for the sub-workflow node;
+	// doing so duplicates them in the parent trace. The child run records its
+	// own events in its own trace, which is attached to SubWorkflowError on
+	// failure.
 	subResult, subErr := sub.Run(ctx, state)
 
 	if subErr != nil {
@@ -591,12 +589,6 @@ func runSubWorkflow[T any](
 			Trace: subTrace,
 		}
 	}
-
-	emit(Event{
-		Kind: EventNodeFinished,
-		Node: string(node.Name),
-		Step: step,
-	})
 
 	return node.NextNode, nil
 }

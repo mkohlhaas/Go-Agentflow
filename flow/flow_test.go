@@ -42,6 +42,16 @@ func countEvents(events []flow.Event, kind flow.EventKind) int {
 	return n
 }
 
+func countNodeEvents(events []flow.Event, kind flow.EventKind, node string) int {
+	n := 0
+	for _, ev := range events {
+		if ev.Kind == kind && ev.Node == node {
+			n++
+		}
+	}
+	return n
+}
+
 func TestSequence(t *testing.T) {
 	wf := flow.New[seqState]("sequence")
 	wf.Task("one", func(_ context.Context, s *seqState) error {
@@ -1094,6 +1104,105 @@ func TestSubWorkflowValidation(t *testing.T) {
 	_, err = wf2.Run(context.Background(), &state)
 	if err == nil || !strings.Contains(err.Error(), "Next is not set") {
 		t.Fatalf("error = %v, want 'Next is not set'", err)
+	}
+}
+
+func TestSubWorkflowEmitsSingleLifecycleEvents(t *testing.T) {
+	sub := flow.New[seqState]("sub")
+	sub.Task("inc", func(_ context.Context, s *seqState) error {
+		s.Value++
+		return nil
+	}).Next("sub-done")
+	sub.Succeed("sub-done")
+
+	wf := flow.New[seqState]("parent")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("run-sub")
+	wf.SubWorkflow("run-sub", sub).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res := runOK(t, wf, &state)
+
+	if got := countNodeEvents(res.Trace, flow.EventNodeStarted, "run-sub"); got != 1 {
+		t.Fatalf("node_started events for run-sub = %d, want 1\n%v", got, res.Trace)
+	}
+	if got := countNodeEvents(res.Trace, flow.EventNodeFinished, "run-sub"); got != 1 {
+		t.Fatalf("node_finished events for run-sub = %d, want 1\n%v", got, res.Trace)
+	}
+	if got := countNodeEvents(res.Trace, flow.EventNodeFailed, "run-sub"); got != 0 {
+		t.Fatalf("node_failed events for run-sub = %d, want 0\n%v", got, res.Trace)
+	}
+}
+
+func TestSubWorkflowFailureEmitsSingleLifecycleEvents(t *testing.T) {
+	boom := errors.New("sub-workflow failure")
+	sub := flow.New[seqState]("sub")
+	sub.Task("bad", func(context.Context, *seqState) error { return boom }).Next("sub-done")
+	sub.Succeed("sub-done")
+
+	wf := flow.New[seqState]("parent")
+	wf.Task("start", func(context.Context, *seqState) error { return nil }).Next("run-sub")
+	wf.SubWorkflow("run-sub", sub).Next("done")
+	wf.Succeed("done")
+
+	var state seqState
+	res, err := wf.Run(context.Background(), &state)
+	if err == nil {
+		t.Fatal("expected error from failing sub-workflow")
+	}
+	if res == nil {
+		t.Fatal("Run returned a nil result")
+	}
+	if got := countNodeEvents(res.Trace, flow.EventNodeStarted, "run-sub"); got != 1 {
+		t.Fatalf("node_started events for run-sub = %d, want 1\n%v", got, res.Trace)
+	}
+	if got := countNodeEvents(res.Trace, flow.EventNodeFailed, "run-sub"); got != 1 {
+		t.Fatalf("node_failed events for run-sub = %d, want 1\n%v", got, res.Trace)
+	}
+	if got := countNodeEvents(res.Trace, flow.EventNodeFinished, "run-sub"); got != 0 {
+		t.Fatalf("node_finished events for run-sub = %d, want 0\n%v", got, res.Trace)
+	}
+}
+
+func TestSubWorkflowValidationRejectsCycles(t *testing.T) {
+	t.Run("mutual", func(t *testing.T) {
+		a := flow.New[seqState]("a")
+		b := flow.New[seqState]("b")
+		a.SubWorkflow("to-b", b).Next("a-done")
+		a.Succeed("a-done")
+		b.SubWorkflow("to-a", a).Next("b-done")
+		b.Succeed("b-done")
+
+		err := a.Validate()
+		if err == nil || !strings.Contains(err.Error(), "cycle") {
+			t.Fatalf("Validate error = %v, want a cycle error", err)
+		}
+	})
+
+	t.Run("self", func(t *testing.T) {
+		wf := flow.New[seqState]("self")
+		wf.SubWorkflow("loop", wf).Next("done")
+		wf.Succeed("done")
+
+		err := wf.Validate()
+		if err == nil || !strings.Contains(err.Error(), "cycle") {
+			t.Fatalf("Validate error = %v, want a cycle error", err)
+		}
+	})
+}
+
+func TestSubWorkflowValidationAllowsSharedSubWorkflow(t *testing.T) {
+	sub := flow.New[seqState]("shared")
+	sub.Task("work", func(context.Context, *seqState) error { return nil }).Next("sub-done")
+	sub.Succeed("sub-done")
+
+	wf := flow.New[seqState]("parent")
+	wf.SubWorkflow("one", sub).Next("two")
+	wf.SubWorkflow("two", sub).Next("done")
+	wf.Succeed("done")
+
+	if err := wf.Validate(); err != nil {
+		t.Fatalf("Validate returned error for shared sub-workflow: %v", err)
 	}
 }
 

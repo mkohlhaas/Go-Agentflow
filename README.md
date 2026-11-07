@@ -22,6 +22,7 @@ small control-flow layer that keeps an autonomous loop inspectable and bounded.
 
 - [Quick start](#quick-start)
 - [Why a fixed graph?](#why-a-fixed-graph)
+- [How it works](#how-it-works)
 - [Node types](#node-types)
 - [API overview](#api-overview)
 - [Execution semantics](#execution-semantics)
@@ -112,6 +113,62 @@ explain. `agentflow` splits responsibilities:
 
 This keeps the graph suitable for Mermaid export and makes every LLM action
 validatable before it is executed.
+
+## How it works
+
+The engine is organized around three concerns: defining the graph, running it,
+and inspecting it.
+
+**Definition — [`flow/flow.go`](flow/flow.go).** `flow.New[T]` creates a
+`Workflow[T]`; the first node added becomes the start unless `StartAt`
+overrides it. The `Task`, `Choice`, `Decision`, `Parallel`,
+`ParallelIsolated`, `Wait`, `Agent`, `SubWorkflow`, `Succeed`, and `Fail`
+builders add nodes, while `Next`, `When`/`Otherwise`, `WithRetry`, and
+`Catch` declare edges. Definition-time
+mistakes — duplicate node names, duplicate routes, empty keys or targets —
+panic immediately. Before anything runs, `Validate` checks the whole graph:
+nil functions, missing destinations, unreachable nodes, and reachable nodes
+that cannot reach a terminal node.
+
+**Execution — [`flow/run.go`](flow/run.go).** `Run` validates the graph, then
+walks it node by node under a `MaxSteps` budget (1000 by default). Each node
+kind has a small executor:
+
+- `Task` runs once, with optional retry and backoff.
+- `Choice` runs deterministic Go code that returns a route key.
+- `Decision` asks a `DecisionPolicy` to pick one declared option; unknown keys
+  are rejected and retried up to `MaxAttempts`.
+- `Parallel` runs branches concurrently, waits for all of them, then joins.
+- `Agent` runs a bounded policy/tool loop, showing the policy the accumulated
+  transcript of previous turns.
+- `SubWorkflow` runs a nested graph as a single opaque step, sharing state.
+- `Wait` sleeps interruptibly.
+- `Succeed` ends the run successfully; `Fail` ends it with
+  `StatusBusinessFailed`.
+
+Errors that match a `Catch` route continue at the route target; otherwise the
+run fails, and context cancellation always ends it as canceled. Every
+transition is recorded as a flat `Event`. `Run` returns a `Result[T]` with the
+final status, the shared state, the visit count, the full trace, and the
+terminal error.
+
+**Inspection — [`flow/mermaid.go`](flow/mermaid.go).** `Mermaid()` renders the
+same static graph as a deterministic flowchart. It shows what *can* happen,
+not what happened during a particular run; use the execution trace for that.
+
+A run is deliberately ephemeral: there is no checkpointing, replay, or durable
+execution. State lives in memory and is discarded when `Run` returns.
+
+The graph is the guardrail. Go code owns control flow, retries, gates, and
+limits; the LLM owns only a choice; deterministic tools own verification. That
+is what keeps an autonomous loop inspectable, boundable, and testable.
+
+**Where to start reading:** begin with `Workflow` and `Node` in
+[`flow/flow.go`](flow/flow.go), follow `Run` and `executeNode` in
+[`flow/run.go`](flow/run.go), then read the
+[coding-agent example](examples/codingagent/main.go) for an end-to-end view.
+The [`learning/`](learning/README.md) directory takes the same concepts one
+example at a time.
 
 ## Node types
 
@@ -287,6 +344,9 @@ addition to per-node validation:
   cycles that would otherwise burn the `MaxSteps` budget at runtime.
 - **Missing terminal:** A workflow with no `Succeed` or `Fail` node is
   rejected.
+- **Sub-workflow cycles:** A sub-workflow that contains itself, directly or
+  indirectly, is rejected instead of recursing until the stack overflows. A
+  sub-workflow may still be shared by multiple parent nodes.
 
 These checks run before any node executes, so graph mistakes surface
 immediately rather than mid-run.
