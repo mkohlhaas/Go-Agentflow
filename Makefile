@@ -1,4 +1,4 @@
-.PHONY: fmt vet test example mermaid
+.PHONY: fmt vet test example mermaid spec
 
 fmt:
 	gofmt -w .
@@ -14,3 +14,6 @@ example:
 
 mermaid:
 	go run ./examples/codingagent -mermaid > docs/coding-agent.mmd
+
+spec:
+	go run ./examples/codingagent -spec > docs/coding-agent.json

@@ -27,6 +27,7 @@ small control-flow layer that keeps an autonomous loop inspectable and bounded.
 - [API overview](#api-overview)
 - [Execution semantics](#execution-semantics)
 - [Visualizing a workflow](#visualizing-a-workflow)
+- [Exporting a workflow specification](#exporting-a-workflow-specification)
 - [Safety guardrails](#safety-guardrails)
 - [The coding-agent example](#the-coding-agent-example)
 - [Limitations](#limitations)
@@ -458,6 +459,56 @@ rendered in a subgraph with fan-out and join edges. The diagram describes the
 static graph; it does not show the runtime state of a particular run. Use the
 execution trace for that.
 
+## Exporting a workflow specification
+
+`Workflow.Spec()` returns a serializable description of the graph as a
+`flow.Spec` value, and `Workflow.MarshalSpec()` returns it as deterministic,
+indented JSON with a trailing newline. The coding-agent example writes
+[`docs/coding-agent.json`](docs/coding-agent.json):
+
+```sh
+go run ./examples/codingagent -spec
+```
+
+The document describes *structure*, not behavior. It includes node kinds,
+routes, decision options and descriptions, retry policies, decision and agent
+limits, tool allowlists, error routes and inlined sub-workflows. It does not
+describe what the Go functions or policies do.
+
+Function references are best-effort and only include stable names: top-level
+functions, methods (with the runtime `-fm` suffix removed) and concrete policy
+types. Anonymous closures are omitted, because their compiler-assigned names
+(`...func1`) change when the enclosing function changes. An omitted `run`,
+`choose` or `policy` field therefore means "the implementation is not stably
+nameable", not that the node has no implementation.
+
+The format is versioned with `specVersion`. `Spec()` returns an error if a
+sub-workflow cycle is encountered; shared sub-workflows are inlined at each
+use. Like `Mermaid()`, `Spec()` describes the declared graph and does not
+validate it.
+
+### YAML
+
+JSON is the canonical format and `flow` keeps its standard-library-only
+promise. To view the spec as YAML, pipe it through a YAML tool:
+
+```sh
+go run ./examples/codingagent -spec | yq -P
+```
+
+On Arch Linux, install the Go implementation with `sudo pacman -S go-yq`. The
+package named `yq` is a different Python/jq wrapper, and the two conflict.
+
+Without `yq`:
+
+```sh
+go run ./examples/codingagent -spec | python3 -c \
+  'import json,sys,yaml; yaml.safe_dump(json.load(sys.stdin), sys.stdout, sort_keys=False)'
+```
+
+The JSON is also valid YAML 1.2, so it can be consumed directly. Regenerate the
+checked-in example with `make spec`.
+
 ## Safety guardrails
 
 - **The LLM never authors the graph.** It only returns route keys or tool calls.
@@ -501,6 +552,7 @@ go run ./examples/codingagent
 go run ./examples/codingagent -trace=false
 go run ./examples/codingagent -keep        # keep the temporary workspace
 go run ./examples/codingagent -mermaid     # print the diagram
+go run ./examples/codingagent -spec        # print the JSON specification
 ```
 
 ## Limitations
@@ -532,13 +584,16 @@ agentflow/
     flow.go       types, builders and validation
     run.go        execution engine, events and agent loop
     mermaid.go    deterministic Mermaid rendering
+    spec.go       deterministic JSON workflow description
     flow_test.go  engine and rendering tests
+    spec_test.go  specification export tests
   examples/
     codingagent/
       main.go     runnable coding-agent workflow
       main_test.go
   docs/
     coding-agent.mmd
+    coding-agent.json
 ```
 
 ## Development
@@ -558,4 +613,5 @@ make vet
 make test
 make example
 make mermaid   # regenerate docs/coding-agent.mmd
+make spec      # regenerate docs/coding-agent.json
 ```

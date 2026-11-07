@@ -31,6 +31,7 @@ type State struct {
 
 func main() {
 	mermaidOnly := flag.Bool("mermaid", false, "print the workflow diagram and exit")
+	specOnly := flag.Bool("spec", false, "print the workflow specification as JSON and exit")
 	keep := flag.Bool("keep", false, "keep the temporary workspace")
 	trace := flag.Bool("trace", true, "print the execution trace")
 	flag.Parse()
@@ -38,6 +39,15 @@ func main() {
 	wf := buildWorkflow()
 	if *mermaidOnly {
 		fmt.Print(wf.Mermaid())
+		return
+	}
+	if *specOnly {
+		data, err := wf.MarshalSpec()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "marshal spec: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(string(data))
 		return
 	}
 
