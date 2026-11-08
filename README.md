@@ -155,9 +155,17 @@ transition is recorded as a flat `Event`. `Run` returns a `Result[T]` with the
 final status, the shared state, the visit count, the full trace, and the
 terminal error.
 
-**Inspection — [`flow/mermaid.go`](flow/mermaid.go).** `Mermaid()` renders the
-same static graph as a deterministic flowchart. It shows what *can* happen,
-not what happened during a particular run; use the execution trace for that.
+**Inspection — [`flow/mermaid.go`](flow/mermaid.go) and
+[`flow/spec.go`](flow/spec.go).** `Mermaid()` renders the same static graph as a
+deterministic flowchart. It shows what *can* happen, not what happened during a
+particular run; use the execution trace for that. `MarshalSpec()` describes the
+declared structure in more detail: node kinds, routes, options, limits, tools,
+error routes and inlined subflows.
+
+The three views form a hierarchy of detail: the Mermaid diagram gives a rough
+overview, the JSON spec gives the exact declared structure, and the Go source is
+the source of truth for behaviour. The generated artifacts are projections of
+the source; regenerate them rather than editing them by hand.
 
 A run is deliberately ephemeral: there is no checkpointing, replay, or durable
 execution. State lives in memory and is discarded when `Run` returns.

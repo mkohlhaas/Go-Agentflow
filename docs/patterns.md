@@ -13,6 +13,7 @@ than repeating their code.
 
 ## Overview
 
+- [Three views of a workflow](#three-views-of-a-workflow)
 - [Choosing the right node](#choosing-the-right-node)
 - [Patterns](#patterns)
   - [Linear pipeline](#linear-pipeline)
@@ -32,6 +33,26 @@ than repeating their code.
 - [Testing workflows](#testing-workflows)
 - [Anti-patterns](#anti-patterns)
 - [Production checklist](#production-checklist)
+
+## Three views of a workflow
+
+The same workflow is visible in three places, and each answers a different
+question:
+
+| View | Answers | Limits |
+| --- | --- | --- |
+| `Mermaid()` | What shape does the graph have? | Structural only; no runtime behaviour. |
+| `MarshalSpec()` | What exactly is declared — node kinds, routes, options, limits, tools, error routes and inlined subflows? | Still structural; not executable and not round-trippable. |
+| Go source | What actually happens — conditions, policies, tools, retries and state changes? | Always authoritative. |
+
+Use the diagram for orientation and review, the spec for detailed structural
+inspection and tooling, and the source when they disagree. If the generated
+artifacts and the source disagree, the artifacts are stale; regenerate them
+rather than editing them by hand.
+
+The spec is more detailed than the diagram, but it is still structure-only.
+Behaviour lives only in the Go source, so "source of truth" means the behaviour
+and the declared graph, while Mermaid and JSON are generated projections of it.
 
 ## Choosing the right node
 
@@ -433,8 +454,9 @@ the spec.
 
 **Pitfalls:**
 
-- Both `Mermaid()` and `MarshalSpec()` are deterministic. Regenerate rather than
-  hand-edit.
+- Both `Mermaid()` and `MarshalSpec()` are deterministic derived views.
+  Regenerate them rather than hand-editing; the Go source remains the source of
+  truth.
 - The spec is structure-only: it is not executable and cannot be round-tripped
   into a workflow.
 - Function references are best-effort. Anonymous closures are omitted, so an
