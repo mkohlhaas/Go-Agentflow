@@ -1,0 +1,61 @@
+specVersion: 1
+description: structure only; behavior is implemented in Go code
+name: coding-agent
+stateType: main.State
+start: prepare
+nodes:
+  - name: prepare
+    kind: task
+    next: triage
+    run:
+      name: main.prepareWorkspace
+      kind: func
+  - name: triage
+    kind: decision
+    choose:
+      name: main.triagePolicy
+      kind: type
+    options:
+      - key: repair
+        target: repair
+        description: Let the coding agent inspect and patch the failing code.
+      - key: stop
+        target: escalate
+        description: Abort instead of attempting a repair.
+    maxAttempts: 2
+  - name: repair
+    kind: tool-loop
+    next: gate
+    goal: Read the failing implementation, patch it, and verify with go test.
+    policy:
+      name: main.repairPolicy
+      kind: type
+    tools:
+      - name: read_file
+        description: Read a UTF-8 file relative to the workspace root.
+        run:
+          name: main.readFile
+          kind: func
+      - name: apply_patch
+        description: Replace the first occurrence of old with new in a workspace file.
+        run:
+          name: main.applyPatch
+          kind: func
+      - name: run_tests
+        description: Run go test ./... in the workspace and record the result.
+        run:
+          name: main.runTests
+          kind: func
+    maxIterations: 6
+  - name: gate
+    kind: choice
+    routes:
+      - key: pass
+        target: report
+      - key: default
+        target: escalate
+  - name: report
+    kind: succeed
+  - name: escalate
+    kind: fail
+    failMessage: automatic repair did not make the tests pass

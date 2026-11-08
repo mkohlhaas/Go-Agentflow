@@ -25,6 +25,7 @@ small control-flow layer that keeps an autonomous loop inspectable and bounded.
 - [Why a fixed graph?](#why-a-fixed-graph)
 - [How it works](#how-it-works)
 - [Node types](#node-types)
+- [Design patterns and best practices](#design-patterns-and-best-practices)
 - [API overview](#api-overview)
 - [Execution semantics](#execution-semantics)
 - [Visualizing a workflow](#visualizing-a-workflow)
@@ -189,6 +190,28 @@ example at a time.
 
 Every node can declare an error route with `Catch(target, match)`. Routes are
 checked in declaration order; a `nil` matcher catches any error.
+
+## Design patterns and best practices
+
+[`docs/patterns.md`](docs/patterns.md) is a practical guide to shaping workflows
+with this library. It covers:
+
+- **Choosing a node** — a table mapping needs to `Task`, `Choice`, `Decision`,
+  `ToolLoop`, `Parallel`, `SubWorkflow`, `Wait`, `Succeed` and `Fail`.
+- **Patterns** — linear pipelines, propose-and-verify, bounded repair loops,
+  whitelisted routing, tool-using agents, fan-out/fan-in, `ForEach`
+  workarounds, reusable subflows, retries with fallbacks, approval gates,
+  observability and docs as code.
+- **State and policy design** — explicit state, safe progress counters,
+  parallel access, untrusted model output and bounded budgets.
+- **Testing and anti-patterns** — fake policies and tools, unhappy-path tests,
+  and the mistakes that make a graph hard to inspect or bound.
+- **A production checklist** for limits, cancellation, secrets, error routes and
+  regenerated artifacts.
+
+Start there before adding a new node kind or a clever control-flow trick. The
+guide is specific to `agentflow`; the [learning examples](learning/README.md)
+remain the hands-on introduction.
 
 ## API overview
 
@@ -598,6 +621,7 @@ agentflow/
       main.go     runnable coding-agent workflow
       main_test.go
   docs/
+    patterns.md   design patterns and best practices
     coding-agent.mmd
     coding-agent.json
 ```
