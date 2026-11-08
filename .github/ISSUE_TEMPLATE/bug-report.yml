@@ -1,0 +1,53 @@
+name: 🐛 Bug Report
+description: File a structured bug report with dropdown options.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report! Please fill out the dropdowns below.
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: e.g. macOS Sequoia, Windows 11
+    validations:
+      required: true
+
+  # --- THIS ACTS AS YOUR RADIO BUTTON ---
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      description: Select the infrastructure environment where the bug occurred.
+      options:
+        - Localhost
+        - Staging
+        - UAT / Testing
+        - Production
+    validations:
+      required: true
+
+  # --- OPTIONAL: MULTI-SELECT DROPDOWN ---
+  - type: dropdown
+    id: browsers
+    attributes:
+      label: Affected Browsers
+      description: You can choose multiple options if applicable.
+      multiple: true # Allows picking more than one option
+      options:
+        - Google Chrome
+        - Mozilla Firefox
+        - Apple Safari
+        - Microsoft Edge
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: 1. Go to... 2. Click on...
+    validations:
+      required: true
+
